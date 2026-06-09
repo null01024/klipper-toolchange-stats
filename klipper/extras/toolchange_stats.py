@@ -83,11 +83,23 @@ class ToolchangeStats:
             except (TypeError, ValueError):
                 # 持久化数据损坏时，保留为空状态
                 self._total = self._empty_stats()
-        # 启动后若有历史记录，主动在控制台展示一次
-        if self._total['count'] > 0:
-            self.gcode.respond_info(
-                "[toolchange_stats] 历史累计: %d 次换热端, 总耗时 %.1fs"
-                % (self._total['count'], self._total['elapsed']))
+        # 启动后主动在控制台展示一次完整的历史累计报告
+        self._report_total_on_ready()
+
+    def _report_total_on_ready(self):
+        data = self._total
+        lines = ['=== 换热端统计 (历史累计) ===',
+                 '换热端次数: %d' % data['count'],
+                 '总耗时:   %.3f 秒' % data['elapsed']]
+        if data['count'] > 0:
+            lines.append('平均耗时: %.3f 秒'
+                         % (data['elapsed'] / data['count']))
+        for s in TOOLCHANGE_STAGES:
+            v = data['stages'][s]
+            avg = (v / data['count']) if data['count'] else 0.0
+            lines.append('阶段 %-9s: 累计=%.3fs 平均=%.3fs' % (s, v, avg))
+        for line in lines:
+            self.gcode.respond_info(line)
 
     def _save_total(self):
         # 一次性写回所有持久化变量
