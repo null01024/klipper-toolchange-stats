@@ -3,21 +3,21 @@
 #
 # 提供两类能力：
 #   1. 时间查询 / 通用计时器 (GET_TIME / START_TIMER ...)
-#   2. 换刀耗时统计 (TOOLCHANGE_TIMER_* / TOOLCHANGE_STAGE_* / TOOLCHANGE_STATS_*)
+#   2. 换热端耗时统计 (TOOLCHANGE_TIMER_* / TOOLCHANGE_STAGE_* / TOOLCHANGE_STATS_*)
 #
-# 换刀统计的数据模型：
-#   current : 当前进行中的一次换刀 (start / 各阶段 elapsed)
+# 换热端统计的数据模型：
+#   current : 当前进行中的一次换热端 (start / 各阶段 elapsed)
 #   print   : 本次打印累计 (次数 / 总耗时 / 各阶段耗时)，PRINT_START 时清零
 #   total   : 历史累计 (跨打印持久化到 save_variables)
 #
-# 阶段定义：release(放下旧热端) -> pickup(拿取新热端) -> heat_wait(等待加热)
+# 阶段定义：release(释放旧热端) -> pickup(抓取新热端) -> heat_wait(等待加热)
 # 任何阶段都是可选的：未 BEGIN 的阶段在 END 时会被静默跳过。
 
 import time
 import datetime
 
 
-# 换刀阶段定义（按发生顺序）
+# 换热端阶段定义（按发生顺序）
 TOOLCHANGE_STAGES = ('release', 'pickup', 'heat_wait')
 
 # 持久化变量名（保存到 save_variables）
@@ -36,7 +36,7 @@ class ToolchangeStats:
         self.gcode = self.printer.lookup_object('gcode')
         # 通用命名计时器
         self.timers = {}
-        # 换刀统计三段式数据
+        # 换热端统计三段式数据
         self._reset_current()
         self._print = self._empty_stats()
         self._total = self._empty_stats()
@@ -86,7 +86,7 @@ class ToolchangeStats:
         # 启动后若有历史记录，主动在控制台展示一次
         if self._total['count'] > 0:
             self.gcode.respond_info(
-                "[toolchange_stats] 历史累计: %d 次换头, 总耗时 %.1fs"
+                "[toolchange_stats] 历史累计: %d 次换热端, 总耗时 %.1fs"
                 % (self._total['count'], self._total['elapsed']))
 
     def _save_total(self):
@@ -149,25 +149,25 @@ class ToolchangeStats:
                             desc='STOP_TIMER NAME=xxx')
         gc.register_command('GET_ELAPSED', self.cmd_GET_ELAPSED,
                             desc='GET_ELAPSED NAME=xxx')
-        # 换刀统计
+        # 换热端统计
         gc.register_command('TOOLCHANGE_TIMER_BEGIN', self.cmd_TC_BEGIN,
-                            desc='开始一次换刀计时')
+                            desc='开始一次换热端计时')
         gc.register_command('TOOLCHANGE_TIMER_END', self.cmd_TC_END,
-                            desc='结束一次换刀，自动累加到本次打印 + 历史累计并保存')
+                            desc='结束一次换热端，自动累加到本次打印 + 历史累计并保存')
         gc.register_command('TOOLCHANGE_STAGE_BEGIN', self.cmd_TC_STAGE_BEGIN,
                             desc='TOOLCHANGE_STAGE_BEGIN STAGE=release|pickup|heat_wait')
         gc.register_command('TOOLCHANGE_STAGE_END', self.cmd_TC_STAGE_END,
                             desc='TOOLCHANGE_STAGE_END STAGE=...')
         gc.register_command('TOOLCHANGE_STATS_RESET_PRINT',
                             self.cmd_TC_RESET_PRINT,
-                            desc='重置本次打印的换刀统计 (PRINT_START 时调用)')
+                            desc='重置本次打印的换热端统计 (PRINT_START 时调用)')
         gc.register_command('TOOLCHANGE_STATS_RESET_TOTAL',
                             self.cmd_TC_RESET_TOTAL,
-                            desc='重置历史累计换刀统计 (谨慎使用)')
+                            desc='重置历史累计换热端统计 (谨慎使用)')
         gc.register_command('TOOLCHANGE_STATS_REPORT', self.cmd_TC_REPORT,
-                            desc='打印换刀统计 [SCOPE=current|print|total|all]')
+                            desc='打印换热端统计 [SCOPE=current|print|total|all]')
         gc.register_command('TOOLCHANGE_STATS_HELP', self.cmd_TC_HELP,
-                            desc='显示换刀统计扩展的全部命令')
+                            desc='显示换热端统计扩展的全部命令')
 
     # ------------------------------------------------------------------
     # 时间查询命令
@@ -208,11 +208,11 @@ class ToolchangeStats:
         gcmd.respond_info("计时器 '%s': %.3f 秒" % (name, elapsed))
 
     # ------------------------------------------------------------------
-    # 换刀统计命令
+    # 换热端统计命令
     # ------------------------------------------------------------------
     def cmd_TC_BEGIN(self, gcmd):
         if self._current['active']:
-            gcmd.respond_info('警告: 上一次换刀计时未结束，已自动重置')
+            gcmd.respond_info('警告: 上一次换热端计时未结束，已自动重置')
         self._reset_current()
         self._current['active'] = True
         self._current['start'] = time.time()
@@ -239,7 +239,7 @@ class ToolchangeStats:
 
     def cmd_TC_END(self, gcmd):
         if not self._current['active']:
-            gcmd.respond_info('警告: 没有进行中的换刀计时，已忽略 END')
+            gcmd.respond_info('警告: 没有进行中的换热端计时，已忽略 END')
             return
         # 异常收尾：如还有阶段未 END，按当前时刻收尾，避免数据丢失
         now = time.time()
@@ -268,19 +268,19 @@ class ToolchangeStats:
         self._save_total()
 
         gcmd.respond_info(
-            "换头 #%d 耗时 %.3fs (放=%.3fs 取=%.3fs 等温=%.3fs)"
+            "换热端 #%d 耗时 %.3fs (释放=%.3fs 抓取=%.3fs 等温=%.3fs)"
             % (self._print['count'], elapsed,
                stages['release'], stages['pickup'], stages['heat_wait']))
 
     def cmd_TC_RESET_PRINT(self, gcmd):
         self._print = self._empty_stats()
         self._reset_current()
-        gcmd.respond_info('本次打印换刀统计已重置')
+        gcmd.respond_info('本次打印换热端统计已重置')
 
     def cmd_TC_RESET_TOTAL(self, gcmd):
         self._total = self._empty_stats()
         self._save_total()
-        gcmd.respond_info('历史累计换刀统计已重置')
+        gcmd.respond_info('历史累计换热端统计已重置')
 
     def cmd_TC_REPORT(self, gcmd):
         scope = gcmd.get('SCOPE', 'all').lower()
@@ -301,7 +301,7 @@ class ToolchangeStats:
             'GET_TIME / GET_DATE / GET_TIMESTAMP',
             '-- 通用计时器 --',
             'START_TIMER NAME=xxx / STOP_TIMER NAME=xxx / GET_ELAPSED NAME=xxx',
-            '-- 换刀计时 (一般由 change_tool 宏自动调用) --',
+            '-- 换热端计时 (一般由 change_tool 宏自动调用) --',
             'TOOLCHANGE_TIMER_BEGIN / TOOLCHANGE_TIMER_END',
             'TOOLCHANGE_STAGE_BEGIN STAGE=release|pickup|heat_wait',
             'TOOLCHANGE_STAGE_END   STAGE=...',
@@ -315,15 +315,15 @@ class ToolchangeStats:
 
     def _report_current(self, gcmd):
         c = self._current
-        gcmd.respond_info('=== 当前换刀状态 ===')
+        gcmd.respond_info('=== 当前换热端状态 ===')
         gcmd.respond_info('进行中: %s' % ('是' if c['active'] else '否'))
         gcmd.respond_info('上次总耗时: %.3f 秒' % c['elapsed'])
         for s in TOOLCHANGE_STAGES:
             gcmd.respond_info('阶段 %-9s: %.3f 秒' % (s, c['stages'][s]))
 
     def _report_block(self, gcmd, title, data):
-        gcmd.respond_info('=== 换刀统计 (%s) ===' % title)
-        gcmd.respond_info('换刀次数: %d' % data['count'])
+        gcmd.respond_info('=== 换热端统计 (%s) ===' % title)
+        gcmd.respond_info('换热端次数: %d' % data['count'])
         gcmd.respond_info('总耗时:   %.3f 秒' % data['elapsed'])
         if data['count'] > 0:
             gcmd.respond_info('平均耗时: %.3f 秒'
