@@ -83,11 +83,22 @@ class ToolchangeStats:
             except (TypeError, ValueError):
                 # 持久化数据损坏时，保留为空状态
                 self._total = self._empty_stats()
-        # 启动后若有历史记录，主动在控制台展示一次
+        # 启动后若有历史记录，延迟 5 秒再在控制台展示一次
+        # （等待前端 WebSocket 订阅完成，避免消息丢失）
         if self._total['count'] > 0:
-            self.gcode.respond_info(
-                "[toolchange_stats] 历史累计: %d 次换热端, 总耗时 %.1fs"
-                % (self._total['count'], self._total['elapsed']))
+            reactor = self.printer.get_reactor()
+            reactor.register_callback(
+                self._delayed_banner,
+                reactor.monotonic() + 5.0)
+
+    def _delayed_banner(self, _eventtime):
+        count = self._total['count']
+        elapsed = self._total['elapsed']
+        avg = (elapsed / count) if count else 0.0
+        self.gcode.respond_info(
+            "[toolchange_stats] 历史累计: %d 次换热端, "
+            "总耗时 %.1fs, 平均 %.3fs/次"
+            % (count, elapsed, avg))
 
     def _save_total(self):
         # 一次性写回所有持久化变量
