@@ -329,11 +329,15 @@ class Multitool:
                 "[multitool] 调用钩子 %s 时 TOOL=%r 非法 "
                 "(应在 0..%d 之间)" % (name, tool, self.tool_count - 1))
         # 校验：钩子宏已注册
-        if name not in self.gcode.gcode_handlers:
+        # 注意：[gcode_macro xxx] 注册的命令名会被 Klipper 转为大写
+        # (alias = name.upper())，gcode_handlers 的 key 也是大写。这里
+        # 必须用大写名去查，否则小写名永远查不到、误报“未定义”。
+        cmd = name.upper()
+        if cmd not in self.gcode.gcode_handlers:
             raise self.printer.command_error(
                 "[multitool] 用户钩子 [gcode_macro %s] 未定义。"
                 "请在 printer.cfg 中实现该宏。" % name)
-        self.gcode.run_script_from_command("%s TOOL=%d" % (name, tool))
+        self.gcode.run_script_from_command("%s TOOL=%d" % (cmd, tool))
 
     def _wait_heater(self, tool):
         # 等待热端到达目标温度。
