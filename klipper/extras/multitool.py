@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Klipper Toolchanger 主模块
+# Klipper Multitool 主模块
 #
 # 职责：
 #   1. 维护当前热端状态 (current_tool)，与 save_variables 双向同步
@@ -7,13 +7,13 @@
 #   3. 编排 change_tool 主流程：抬升 / 切 accel / 调用用户钩子 / 落盘 / 等温
 #
 # 子模块通过 lookup_object 探测，未声明则跳过对应分支：
-#   - toolchanger_clamp   : 钩子前后置自动调用 assert_state
-#   - toolchanger_offsets : 切换完成后调用 apply()
-#   - toolchanger_stats   : 全流程嵌入计时
+#   - multitool_clamp   : 钩子前后置自动调用 assert_state
+#   - multitool_offsets : 切换完成后调用 apply()
+#   - multitool_stats   : 全流程嵌入计时
 #
 # 用户必须实现两个宏：
-#   [gcode_macro toolchanger_release_tool]   入参 TOOL=<int>
-#   [gcode_macro toolchanger_pickup_tool]    入参 TOOL=<int>
+#   [gcode_macro multitool_release_tool]   入参 TOOL=<int>
+#   [gcode_macro multitool_pickup_tool]    入参 TOOL=<int>
 #
 # M109 不再由本插件重写。多热端场景下用户可自行写 [gcode_macro M109]
 # (rename_existing: M99109)，根据需要把 T 补成 current_tool 后转发给原版。
@@ -30,7 +30,7 @@ HEAT_WAIT_MIN_TARGET = 50.
 PRINT_STATE_POLL_S = 1.0
 
 
-class Toolchanger:
+class Multitool:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
@@ -39,8 +39,8 @@ class Toolchanger:
         self.tool_count = config.getint('tool_count', minval=1, maxval=16)
         self.z_hop = config.getfloat('z_hop', 0.4, minval=0.)
         self.feed_z = config.getint('feed_z', 600, minval=1)
-        self.accel_toolchange = config.getfloat(
-            'accel_toolchange', 8000., above=0.)
+        self.accel_swap = config.getfloat(
+            'accel_swap', 8000., above=0.)
         self.untool_safe_z = config.getfloat(
             'untool_safe_z', 10., minval=0.)
 
@@ -101,9 +101,9 @@ class Toolchanger:
                             cb(prev_state, cur_state)
                         except Exception:
                             logging.exception(
-                                "toolchanger: print_state listener error")
+                                "multitool: print_state listener error")
         except Exception:
-            logging.exception("toolchanger: poll_print_state error")
+            logging.exception("multitool: poll_print_state error")
         return eventtime + PRINT_STATE_POLL_S
 
     # ------------------------------------------------------------------
@@ -121,7 +121,7 @@ class Toolchanger:
         conflicts = [n for n in names if n in existing]
         if conflicts:
             raise self.printer.command_error(
-                "[toolchanger] 以下命令已被其他 section 注册（可能是旧的 "
+                "[multitool] 以下命令已被其他 section 注册（可能是旧的 "
                 "[gcode_macro] 残留），请删除后重启：%s"
                 % ', '.join(conflicts))
 
@@ -192,9 +192,9 @@ class Toolchanger:
         # max_accel 永久错乱)，调试成本极高。这里在最早期直接拒绝。
         if self.active:
             raise self.printer.command_error(
-                "[toolchanger] 当前正在换头中，禁止重入。"
-                "请检查钩子宏 (toolchanger_release_tool / "
-                "toolchanger_pickup_tool) 是否调用了 T*/CHANGE_TOOL/UNTOOL。")
+                "[multitool] 当前正在换头中，禁止重入。"
+                "请检查钩子宏 (multitool_release_tool / "
+                "multitool_pickup_tool) 是否调用了 T*/CHANGE_TOOL/UNTOOL。")
 
         old_tool = self.current_tool
         if new_tool == old_tool:
@@ -208,9 +208,9 @@ class Toolchanger:
         else:
             gcmd.respond_info("切换工具: T%d -> T%d" % (old_tool, new_tool))
 
-        clamp = self.printer.lookup_object('toolchanger_clamp', None)
-        offsets = self.printer.lookup_object('toolchanger_offsets', None)
-        stats = self.printer.lookup_object('toolchanger_stats', None)
+        clamp = self.printer.lookup_object('multitool_clamp', None)
+        offsets = self.printer.lookup_object('multitool_offsets', None)
+        stats = self.printer.lookup_object('multitool_stats', None)
 
         # 备份 accel；try/finally 保证恢复
         toolhead = self.printer.lookup_object('toolhead')
@@ -231,7 +231,7 @@ class Toolchanger:
             self.gcode.run_script_from_command(
                 "SAVE_GCODE_STATE NAME=_tc_change_tool")
             self.gcode.run_script_from_command(
-                "SET_VELOCITY_LIMIT ACCEL=%.0f" % self.accel_toolchange)
+                "SET_VELOCITY_LIMIT ACCEL=%.0f" % self.accel_swap)
             prepared = True
             self.gcode.run_script_from_command("G91")
             self.gcode.run_script_from_command(
@@ -252,7 +252,7 @@ class Toolchanger:
             if old_tool != -1:
                 if stats is not None:
                     stats.stage_begin('release')
-                self._invoke_hook('toolchanger_release_tool', old_tool)
+                self._invoke_hook('multitool_release_tool', old_tool)
                 if stats is not None:
                     stats.stage_end('release')
                 if clamp is not None:
@@ -263,7 +263,7 @@ class Toolchanger:
             if new_tool != -1:
                 if stats is not None:
                     stats.stage_begin('pickup')
-                self._invoke_hook('toolchanger_pickup_tool', new_tool)
+                self._invoke_hook('multitool_pickup_tool', new_tool)
                 if stats is not None:
                     stats.stage_end('pickup')
                 if clamp is not None:
@@ -319,12 +319,12 @@ class Toolchanger:
         # 校验：tool 必须在 [0, tool_count-1]
         if not isinstance(tool, int) or tool < 0 or tool >= self.tool_count:
             raise self.printer.command_error(
-                "[toolchanger] 调用钩子 %s 时 TOOL=%r 非法 "
+                "[multitool] 调用钩子 %s 时 TOOL=%r 非法 "
                 "(应在 0..%d 之间)" % (name, tool, self.tool_count - 1))
         # 校验：钩子宏已注册
         if name not in self.gcode.gcode_handlers:
             raise self.printer.command_error(
-                "[toolchanger] 用户钩子 [gcode_macro %s] 未定义。"
+                "[multitool] 用户钩子 [gcode_macro %s] 未定义。"
                 "请在 printer.cfg 中实现该宏。" % name)
         self.gcode.run_script_from_command("%s TOOL=%d" % (name, tool))
 
@@ -362,4 +362,4 @@ class Toolchanger:
 
 
 def load_config(config):
-    return Toolchanger(config)
+    return Multitool(config)

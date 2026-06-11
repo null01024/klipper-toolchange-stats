@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Klipper Toolchanger - 夹紧检测子模块
+# Klipper Multitool - 夹紧检测子模块
 #
 # 职责：
 #   - 用 buttons helper 注册一个输入 pin，监听夹紧开关电平
-#   - 提供 assert_state(expect, reason) 给 toolchanger 主流程在
+#   - 提供 assert_state(expect, reason) 给 multitool 主流程在
 #     钩子前后置自动调用
 #   - 提供 QUERY_CLAMP_STATUS 给用户排查
 #
@@ -26,7 +26,7 @@ import logging
 BOOT_GRACE_S = 2.0
 
 
-class ToolchangerClamp:
+class MultitoolClamp:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
@@ -63,7 +63,7 @@ class ToolchangerClamp:
     def _check_initial_report(self, _eventtime):
         if self._state is None:
             logging.warning(
-                "toolchanger_clamp: 启动 %.1fs 后仍未收到 buttons 状态上报"
+                "multitool_clamp: 启动 %.1fs 后仍未收到 buttons 状态上报"
                 " (pin=%s)；首次 assert_state 将按期望状态做种子化。"
                 " 若与实际机械状态不符，请检查 pin 接线 / 电平修饰符。",
                 BOOT_GRACE_S, self.pin)
@@ -77,7 +77,7 @@ class ToolchangerClamp:
         self._seeded = False
 
     # ------------------------------------------------------------------
-    # 公共方法：被 toolchanger 主流程调用
+    # 公共方法：被 multitool 主流程调用
     # ------------------------------------------------------------------
     def assert_state(self, expect, reason=''):
         if expect not in ('clamped', 'released'):
@@ -104,7 +104,7 @@ class ToolchangerClamp:
                 % (self.pin, expect))
 
         if actual != expect:
-            tc = self.printer.lookup_object('toolchanger', None)
+            tc = self.printer.lookup_object('multitool', None)
             cur = tc.current_tool if tc is not None else -1
             expect_cn = "已夹紧" if expect == 'clamped' else "已释放"
             actual_cn = "已夹紧" if actual == 'clamped' else "已释放"
@@ -146,4 +146,4 @@ class ToolchangerClamp:
 
 
 def load_config(config):
-    return ToolchangerClamp(config)
+    return MultitoolClamp(config)

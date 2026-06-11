@@ -1,5 +1,5 @@
 #!/bin/bash
-# Klipper toolchange-stats 安装脚本
+# Klipper multitool-stats 安装脚本
 # 用法 (远程):
 #   wget -O - https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install.sh | bash
 # 用法 (本地):
@@ -11,9 +11,9 @@ CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
 REPO_URL="${REPO_URL:-https://github.com/null01024/klipper-toolchange-stats.git}"
 
 # 配置在 printer.cfg 中的 include 行（写在文件最顶部）
-INCLUDE_LINE="[include toolchange/*.cfg]"
-CONFIG_SUBDIR="toolchange"
-CONFIG_FILENAME="toolchange_config.cfg"
+INCLUDE_LINE="[include multitool/*.cfg]"
+CONFIG_SUBDIR="multitool"
+CONFIG_FILENAME="multitool_config.cfg"
 
 set -eu
 export LC_ALL=C
@@ -72,8 +72,8 @@ function link_extension {
             resolved="$(readlink "${target}" 2>/dev/null || true)"
             if [ "${resolved}" != "${file}" ]; then
                 if [ "${FORCE:-0}" = "1" ]; then
-                    echo "  -> [WARN] ${base} 已存在 (${resolved:-非软链})，FORCE=1 已强制覆盖（备份为 ${base}.bak.toolchange）"
-                    cp -P "${target}" "${target}.bak.toolchange"
+                    echo "  -> [WARN] ${base} 已存在 (${resolved:-非软链})，FORCE=1 已强制覆盖（备份为 ${base}.bak.multitool）"
+                    cp -P "${target}" "${target}.bak.multitool"
                 else
                     echo "[ERROR] ${target} 已存在且不是本仓库的软链 (resolved='${resolved:-非软链}')。"
                     echo "        为避免覆盖你自定义的同名插件，已中止安装。"
@@ -90,7 +90,7 @@ function link_extension {
 
 function clean_orphan_links {
     # 清理本仓库遗留的孤儿软链：
-    #   指向本仓库 extras 目录、但源文件已被删除（如旧版 toolchange_stats.py）。
+    #   指向本仓库 extras 目录、但源文件已被删除（如旧版 multitool_stats.py）。
     # 仅删除断链且 readlink 落在本仓库 extras 目录内的软链，
     # 不碰用户自有插件或其它来源的文件。
     local repo_extras extras_dir resolved
@@ -144,12 +144,12 @@ function patch_printer_cfg {
     fi
 
     echo "[CONFIG] 在 printer.cfg 顶部插入：${INCLUDE_LINE}"
-    cp "${printer_cfg}" "${printer_cfg}.bak.toolchange"
+    cp "${printer_cfg}" "${printer_cfg}.bak.multitool"
     {
         printf "%s\n\n" "${INCLUDE_LINE}"
-        cat "${printer_cfg}.bak.toolchange"
+        cat "${printer_cfg}.bak.multitool"
     } > "${printer_cfg}"
-    echo "  -> 已备份原文件到 printer.cfg.bak.toolchange"
+    echo "  -> 已备份原文件到 printer.cfg.bak.multitool"
 }
 
 function restart_klipper {
@@ -158,7 +158,7 @@ function restart_klipper {
 }
 
 printf "\n=========================================\n"
-echo "- Klipper toolchange-stats 安装脚本 -"
+echo "- Klipper multitool-stats 安装脚本 -"
 printf "=========================================\n\n"
 
 preflight_checks
@@ -181,8 +181,8 @@ printer.cfg 顶部已自动加入：
 
 下一步：
     1. 编辑 ${CONFIG_PATH}/${CONFIG_SUBDIR}/${CONFIG_FILENAME}
-    2. 修改 [toolchanger] 字段（tool_count / z_hop / 等）
-    3. 替换两个钩子宏（toolchanger_release_tool / toolchanger_pickup_tool）
+    2. 修改 [multitool] 字段（tool_count / z_hop / 等）
+    3. 替换两个钩子宏（multitool_release_tool / multitool_pickup_tool）
        的实现 —— 默认实现会直接报错以提示你必须替换
     4. 重启 Klipper：FIRMWARE_RESTART
     5. 验证：QUERY_TOOL_STATUS

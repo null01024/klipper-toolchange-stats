@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Klipper Toolchanger - 偏移管理子模块
+# Klipper Multitool - 偏移管理子模块
 #
 # 职责：
 #   - 启动时从 save_variables 加载各热端的 X/Y/Z 校准值
@@ -21,7 +21,7 @@ PERSIST_BASE_TOOL = 'base_tool'
 PRINTING_STATES = ('printing',)
 
 
-class ToolchangerOffsets:
+class MultitoolOffsets:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
@@ -49,7 +49,7 @@ class ToolchangerOffsets:
     # ------------------------------------------------------------------
     def _on_ready(self):
         sv = self.printer.lookup_object('save_variables', None)
-        tc = self.printer.lookup_object('toolchanger', None)
+        tc = self.printer.lookup_object('multitool', None)
         if sv is not None and tc is not None:
             v = getattr(sv, 'allVariables', {}) or {}
             try:
@@ -70,15 +70,15 @@ class ToolchangerOffsets:
         if (cur_state in PRINTING_STATES
                 and prev_state not in PRINTING_STATES):
             # 进入打印态，清空基准让首次 pickup 自动接管
-            tc = self.printer.lookup_object('toolchanger', None)
+            tc = self.printer.lookup_object('multitool', None)
             if tc is not None and tc.base_tool != -1:
                 tc.base_tool = -1
                 self.gcode.respond_info(
-                    "[toolchanger_offsets] 检测到打印开始，"
+                    "[multitool_offsets] 检测到打印开始，"
                     "自动重置基准热端，将由首次抓取的热端接管")
 
     # ------------------------------------------------------------------
-    # 公共方法：被 toolchanger 主流程调用
+    # 公共方法：被 multitool 主流程调用
     # ------------------------------------------------------------------
     def apply(self, tool, base_tool=-1):
         """切换完成后调用。设置 SET_GCODE_OFFSET 应用该热端的校准值。"""
@@ -87,14 +87,14 @@ class ToolchangerOffsets:
 
         # 自动基准：base_tool 未设置时，把当前 tool 作为基准
         if self.z_offset_adaptive and base_tool < 0:
-            tc = self.printer.lookup_object('toolchanger', None)
+            tc = self.printer.lookup_object('multitool', None)
             if tc is not None:
                 tc.base_tool = tool
                 self.gcode.run_script_from_command(
                     "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
                     % (PERSIST_BASE_TOOL, tool))
                 self.gcode.respond_info(
-                    "[toolchanger_offsets] 自动设置基准热端 = T%d" % tool)
+                    "[multitool_offsets] 自动设置基准热端 = T%d" % tool)
                 base_tool = tool
 
         ox = self._read_offset(tool, 'x')
@@ -155,4 +155,4 @@ class ToolchangerOffsets:
 
 
 def load_config(config):
-    return ToolchangerOffsets(config)
+    return MultitoolOffsets(config)
