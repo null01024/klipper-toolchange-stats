@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Klipper Toolchanger - 计时统计子模块
+# Klipper Multitool - 计时统计子模块
 #
 # 自动行为（无任何手动入口）：
 #   1. 主模块调用 tc_begin/stage_begin/stage_end/tc_commit/tc_abort (Python API)
@@ -11,8 +11,8 @@
 #
 # 不再注册任何手动 G-code 命令；行为完全由插件自动驱动。
 #
-# 持久化字段命名沿用旧版 (tc_total_*)，迁移用户改完 section 名 (toolchange_stats →
-# toolchanger_stats) 后历史数据自动延续。
+# 持久化字段命名沿用旧版 (tc_total_*)，迁移用户改完 section 名
+# (multitoolr_stats → multitool_stats) 后历史数据自动延续。
 
 from time import monotonic
 
@@ -26,7 +26,7 @@ PRINTING_STATES = ('printing',)
 ENDED_STATES = ('complete', 'cancelled', 'error', 'standby')
 
 
-class ToolchangerStats:
+class MultitoolStats:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
@@ -95,7 +95,7 @@ class ToolchangerStats:
                 reactor.monotonic() + self.boot_banner_delay_s)
 
         # 注册到主模块的统一 print_stats.state 轮询（不再各自开定时器）
-        tc = self.printer.lookup_object('toolchanger', None)
+        tc = self.printer.lookup_object('multitool', None)
         if tc is not None:
             tc.register_print_state_listener(self._on_print_state_changed)
 
@@ -110,14 +110,14 @@ class ToolchangerStats:
             self._print = self._empty_stats()
             self._reset_current()
             self.gcode.respond_info(
-                "[toolchanger_stats] 检测到打印开始，自动重置本次统计")
+                "[multitool_stats] 检测到打印开始，自动重置本次统计")
 
         # 离开打印态进入结束态：输出报告。
         # 注意只认 ENDED_STATES，'paused' 不算结束，避免暂停时误触发报告。
         if prev in PRINTING_STATES and cur in ENDED_STATES:
             if self._print['count'] > 0:
                 self.gcode.respond_info(
-                    "[toolchanger_stats] 检测到打印结束 (state=%s)，"
+                    "[multitool_stats] 检测到打印结束 (state=%s)，"
                     "输出本次统计：" % cur)
                 self._auto_report()
 
@@ -143,7 +143,7 @@ class ToolchangerStats:
         elapsed = self._total['elapsed']
         avg = (elapsed / count) if count else 0.0
         self.gcode.respond_info(
-            "[toolchanger_stats] 历史累计: %d 次换热端, "
+            "[multitool_stats] 历史累计: %d 次换热端, "
             "总耗时 %.1fs, 平均 %.3fs/次"
             % (count, elapsed, avg))
 
@@ -184,7 +184,7 @@ class ToolchangerStats:
         }
 
     # ------------------------------------------------------------------
-    # Python API：供 toolchanger 主模块直接调用（避免 G-code 往返）
+    # Python API：供 multitool 主模块直接调用（避免 G-code 往返）
     # ------------------------------------------------------------------
     def tc_begin(self):
         if self._current['active']:
@@ -252,4 +252,4 @@ class ToolchangerStats:
 
 
 def load_config(config):
-    return ToolchangerStats(config)
+    return MultitoolStats(config)
