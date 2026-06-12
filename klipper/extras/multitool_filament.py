@@ -22,14 +22,16 @@
 #     通道即代表电平一直保持 RELEASED，落定为"已卸载(False)"，并输出一份
 #     状态总览，避免后续 assert_loaded 因 None 而走"未知放行"路径。
 #
-# 配置示例：
+# 通道数：不再单独配置，直接复用 [multitool] 的 tool_count
+#   （通道与工具头一一对应：assert_loaded 的 channel 就是工具头编号）。
+#
+# 配置示例 (tool_count=4 时需配 pin_0..pin_3)：
 #   [multitool_filament]
-#   channel_count: 8
 #   boot_grace_s: 5
 #   pin_0: ^multihotend:IO0
 #   pin_1: ^multihotend:IO1
-#   ...
-#   pin_7: ^multihotend:IO7
+#   pin_2: ^multihotend:IO2
+#   pin_3: ^multihotend:IO3
 
 
 class MultitoolFilament:
@@ -37,16 +39,19 @@ class MultitoolFilament:
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
 
-        self.channel_count = config.getint('channel_count', minval=1)
+        # 通道数直接复用 [multitool] 的 tool_count：通道与工具头一一对应，
+        # 不再单独配置 channel_count。load_object 确保主模块已加载。
+        multitool = self.printer.load_object(config, 'multitool')
+        self.tool_count = multitool.tool_count
         self.boot_grace_s = config.getfloat(
             'boot_grace_s', 5., minval=0.)
 
         buttons = self.printer.load_object(config, 'buttons')
 
         # 各通道装载状态：None 表示尚未收到任何上报
-        self._loaded = [None] * self.channel_count
+        self._loaded = [None] * self.tool_count
 
-        for ch in range(self.channel_count):
+        for ch in range(self.tool_count):
             pin = config.get('pin_%d' % ch)
             buttons.register_buttons([pin], self._make_callback(ch))
 
@@ -61,12 +66,12 @@ class MultitoolFilament:
             reactor.monotonic() + self.boot_grace_s)
 
     def _seed_and_report(self, _eventtime):
-        for ch in range(self.channel_count):
+        for ch in range(self.tool_count):
             if self._loaded[ch] is None:
                 # 启动宽限期内未收到回调 → 电平一直是 RELEASED → 已卸载
                 self._loaded[ch] = False
         lines = []
-        for ch in range(self.channel_count):
+        for ch in range(self.tool_count):
             lines.append("通道%d=%s" % (
                 ch, '已装载' if self._loaded[ch] else '已卸载'))
         self.gcode.respond_info(
@@ -86,13 +91,13 @@ class MultitoolFilament:
 
     # ------------------------------------------------------------------
     # 公共方法：被 multitool 主流程在换头前调用
-    #   - 通道未配置 (channel >= channel_count) → 视为有耗材，不阻塞
+    #   - 通道未配置 (channel >= tool_count) → 视为有耗材，不阻塞
     #   - 状态未知 (None，开机后从未上报过电平变化) → 视为有耗材，仅警告，
     #     不阻塞（buttons helper 仅在电平变化时回调，与 clamp 模块同样的取舍）
     #   - 明确无耗材 (False) → 抛错阻止换头
     # ------------------------------------------------------------------
     def assert_loaded(self, channel, reason=''):
-        if channel < 0 or channel >= self.channel_count:
+        if channel < 0 or channel >= self.tool_count:
             return
 
         loaded = self._loaded[channel]
@@ -111,7 +116,7 @@ class MultitoolFilament:
 
     def get_status(self, eventtime):
         return {
-            'channel_count': self.channel_count,
+            'tool_count': self.tool_count,
             'loaded': list(self._loaded),
         }
 
