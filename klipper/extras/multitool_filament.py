@@ -6,6 +6,8 @@
 #   - 通道电平变化时在控制台输出装载 / 卸载提示 (M118)
 #   - 提供 assert_loaded(channel) 给 multitool 主流程在换头前调用：
 #     目标工具头通道无耗材时阻止切换
+#   - 断料续打：打印中当前热端断料时，自动切到同组下一个有料热端继续打印；
+#     同组无可用热端时正常暂停 (见 continuation_groups)
 #
 # 可选模块：未声明 [multitool_filament] 时主流程探测不到本对象，
 #           视为所有工具头都有耗材，不阻塞换头。
@@ -25,26 +27,56 @@
 # 通道数：不再单独配置，直接复用 [multitool] 的 tool_count
 #   （通道与工具头一一对应：assert_loaded 的 channel 就是工具头编号）。
 #
+# 断料续打 (continuation_groups)：
+#   - 格式 [1,2],[0],[3]：每个方括号是一个有序续打组。
+#   - 打印中当前热端断料 → 在组内从当前热端之后按顺序(环绕)找下一个"有料"
+#     的热端，找到就自动 PAUSE → 换头 → RESUME；跳过同样没料的成员。
+#   - 当前热端不在任何组 / 组里只有它自己 / 全组都没料 → 正常 PAUSE 暂停。
+#   - 仅在配置了 continuation_groups 时启用；不配置则维持"只打印提示"。
+#
 # 配置示例 (tool_count=4 时需配 pin_0..pin_3)：
 #   [multitool_filament]
 #   boot_grace_s: 5
+#   continuation_groups: [1,2],[0],[3]
 #   pin_0: ^multihotend:IO0
 #   pin_1: ^multihotend:IO1
 #   pin_2: ^multihotend:IO2
 #   pin_3: ^multihotend:IO3
+
+import logging
+import re
+
+# 断料事件去抖窗口（秒）：一次断料处理后，此时间内不再重复触发，
+# 避免开关抖动 / 换头过程中的电平变化引发二次续打。
+RUNOUT_EVENT_DELAY = 3.
 
 
 class MultitoolFilament:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
+        self.reactor = self.printer.get_reactor()
 
         # 通道数直接复用 [multitool] 的 tool_count：通道与工具头一一对应，
         # 不再单独配置 channel_count。load_object 确保主模块已加载。
-        multitool = self.printer.load_object(config, 'multitool')
-        self.tool_count = multitool.tool_count
+        self.multitool = self.printer.load_object(config, 'multitool')
+        self.tool_count = self.multitool.tool_count
         self.boot_grace_s = config.getfloat(
             'boot_grace_s', 5., minval=0.)
+        self.runout_event_delay = config.getfloat(
+            'runout_event_delay', RUNOUT_EVENT_DELAY, minval=0.)
+
+        # ---- 续打组解析 ----
+        # self.groups: list[list[int]]   原始组定义（保留顺序）
+        # self._group_of: dict[int, list[int]]  tool -> 其所在组
+        self.groups, self._group_of = self._parse_groups(
+            config.get('continuation_groups', '').strip())
+        # 仅在配置了续打组时启用断料处理（向后兼容：不配置则只打印提示）
+        self.runout_enabled = bool(self.groups)
+
+        # ---- 断料处理运行时守卫 ----
+        self._handling_runout = False
+        self._min_event_systime = 0.
 
         buttons = self.printer.load_object(config, 'buttons')
 
@@ -56,6 +88,57 @@ class MultitoolFilament:
             buttons.register_buttons([pin], self._make_callback(ch))
 
         self.printer.register_event_handler('klippy:ready', self._on_ready)
+        self.printer.register_event_handler('klippy:connect', self._on_connect)
+
+    # ------------------------------------------------------------------
+    # 续打组解析 + 校验
+    #   输入形如 "[1,2],[0],[3]"，输出 (groups, group_of)
+    #   - 空字符串 → 不启用续打（返回空）
+    #   - 索引须在 0..tool_count-1
+    #   - 同一 tool 不能出现在多个组（语义二义）
+    # ------------------------------------------------------------------
+    def _parse_groups(self, raw):
+        if not raw:
+            return [], {}
+        groups = []
+        seen = {}
+        for m in re.finditer(r'\[([^\]]*)\]', raw):
+            body = m.group(1).strip()
+            if not body:
+                continue
+            members = []
+            for part in body.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    idx = int(part)
+                except ValueError:
+                    raise self.printer.config_error(
+                        "[multitool_filament] continuation_groups 含非数字: %r"
+                        % part)
+                if idx < 0 or idx >= self.tool_count:
+                    raise self.printer.config_error(
+                        "[multitool_filament] continuation_groups 中的热端 %d "
+                        "越界 (应在 0..%d)" % (idx, self.tool_count - 1))
+                if idx in seen:
+                    raise self.printer.config_error(
+                        "[multitool_filament] 热端 %d 出现在多个续打组中，"
+                        "语义二义，请检查 continuation_groups。" % idx)
+                seen[idx] = True
+                members.append(idx)
+            if members:
+                groups.append(members)
+        group_of = {}
+        for g in groups:
+            for t in g:
+                group_of[t] = g
+        return groups, group_of
+
+    def _on_connect(self):
+        self.gcode.register_command(
+            'QUERY_FILAMENT_STATUS', self.cmd_QUERY_FILAMENT_STATUS,
+            desc='查询各通道耗材装载状态与续打组')
 
     def _on_ready(self):
         # 启动后等 boot_grace_s 秒，让 buttons helper 把当前电平上报完，
@@ -79,15 +162,170 @@ class MultitoolFilament:
 
     def _make_callback(self, channel):
         def _callback(eventtime, state):
-            self._on_button(channel, state)
+            self._on_button(eventtime, channel, state)
         return _callback
 
-    def _on_button(self, channel, state):
+    def _on_button(self, eventtime, channel, state):
         loaded = bool(state)
         self._loaded[channel] = loaded
         action = '已装载' if loaded else '已卸载'
         self.gcode.run_script_from_command(
             "M118 通道%d，耗材%s" % (channel, action))
+        # 断料续打触发判定：仅当
+        #   - 启用了续打 (配置了 continuation_groups)
+        #   - 该通道变为"已卸载"
+        #   - 该通道正是当前正在打印的热端
+        #   - 当前不在换头中、也不在上一次断料处理中
+        #   - 已过去抖窗
+        #   - print_stats.state == 'printing'
+        # 全部满足时，延迟到 gcode 上下文执行 _runout_event_handler
+        # （button 回调里不能直接跑 PAUSE/CHANGE_TOOL 这类长脚本）。
+        if (self.runout_enabled and not loaded
+                and channel == self.multitool.current_tool
+                and not self.multitool.active
+                and not self._handling_runout
+                and eventtime >= self._min_event_systime
+                and self._is_printing(eventtime)):
+            self._handling_runout = True
+            self.reactor.register_callback(self._runout_event_handler)
+
+    def _is_printing(self, eventtime):
+        ps = self.printer.lookup_object('print_stats', None)
+        if ps is None:
+            return False
+        return ps.get_status(eventtime).get('state') == 'printing'
+
+    # ------------------------------------------------------------------
+    # 在 cur 所在续打组里，从 cur 之后按顺序(环绕)找下一个"有料"的热端。
+    #   - cur 不在任何组 / 组里只有它自己 / 找不到有料成员 → 返回 None
+    # ------------------------------------------------------------------
+    def _find_next_loaded(self, cur):
+        group = self._group_of.get(cur)
+        if not group:
+            return None
+        n = len(group)
+        idx = group.index(cur)
+        for i in range(1, n):
+            cand = group[(idx + i) % n]
+            if cand == cur:
+                continue
+            if self._loaded[cand]:
+                return cand
+        return None
+
+    # ------------------------------------------------------------------
+    # 读取某热端 extruder 的目标温度；查不到 extruder 返回 None。
+    # ------------------------------------------------------------------
+    def _heater_target(self, tool):
+        section = 'extruder' if tool == 0 else 'extruder%d' % tool
+        extruder = self.printer.lookup_object(section, None)
+        if extruder is None:
+            return None
+        return extruder.get_heater().target_temp
+
+    # ------------------------------------------------------------------
+    # 生成一条把当前 toolhead 速度限制写回的 SET_VELOCITY_LIMIT 命令。
+    #   RESTORE_GCODE_STATE 不恢复这些 toolhead 层限制，续打结尾用它兜底，
+    #   防止 before/after 钩子改了限制残留到续打后的打印。
+    #   参数名跨版本：cruise ratio 按 get_status 实际键名选择。
+    # ------------------------------------------------------------------
+    def _velocity_limit_restore_cmd(self, eventtime):
+        toolhead = self.printer.lookup_object('toolhead')
+        st = toolhead.get_status(eventtime)
+        parts = [
+            "VELOCITY=%.6f" % st['max_velocity'],
+            "ACCEL=%.6f" % st['max_accel'],
+            "SQUARE_CORNER_VELOCITY=%.6f" % st['square_corner_velocity'],
+        ]
+        if 'minimum_cruise_ratio' in st:
+            parts.append(
+                "MINIMUM_CRUISE_RATIO=%.6f" % st['minimum_cruise_ratio'])
+        elif 'max_accel_to_decel' in st:
+            parts.append(
+                "ACCEL_TO_DECEL=%.6f" % st['max_accel_to_decel'])
+        return "SET_VELOCITY_LIMIT " + " ".join(parts)
+
+    # ------------------------------------------------------------------
+    # 断料事件处理（reactor 回调，运行在 gcode 上下文之外，可安全 run_script）
+    #   无论能否续打，第一步都先暂停；再判断分支。
+    # ------------------------------------------------------------------
+    def _runout_event_handler(self, eventtime):
+        try:
+            cur = self.multitool.current_tool
+            # 抖窗期间状态可能已变（已暂停 / 已换头 / 当前热端变了）→ 放弃
+            if (cur < 0 or self.multitool.active
+                    or self._loaded[cur]
+                    or not self._is_printing(eventtime)):
+                return
+
+            # 尽快停料：先发 pause 标志位，再跑 PAUSE 宏
+            pause_resume = self.printer.lookup_object('pause_resume', None)
+            if pause_resume is not None:
+                pause_resume.send_pause_command()
+
+            next_tool = self._find_next_loaded(cur)
+            if next_tool is None:
+                self.gcode.run_script(
+                    "PAUSE\n"
+                    "M118 [断料续打] 通道%d 断料，且同组无可续打热端，"
+                    "已暂停打印。\n"
+                    "M400" % cur)
+                return
+
+            self.gcode.respond_info(
+                "[断料续打] 通道%d 断料，自动续打 → T%d" % (cur, next_tool))
+            # 把旧热端目标温度复制到新热端，使随后的 CHANGE_TOOL 自动等温
+            old_target = self._heater_target(cur)
+            offsets = self.printer.lookup_object('multitool_offsets', None)
+            # 续打前(钩子运行前)抓取当前速度限制，结尾兜底写回
+            restore_vlimit = self._velocity_limit_restore_cmd(eventtime)
+            script = ["PAUSE"]
+            if old_target is not None:
+                script.append("M104 T%d S%.1f" % (next_tool, old_target))
+            if self._has_macro('multitool_filament_before_swap'):
+                script.append(
+                    "multitool_filament_before_swap FROM=%d TO=%d"
+                    % (cur, next_tool))
+            script.append("CHANGE_TOOL T=%d" % next_tool)
+            # 换头完成后关闭旧热端
+            script.append("M104 T%d S0" % cur)
+            if self._has_macro('multitool_filament_after_swap'):
+                script.append(
+                    "multitool_filament_after_swap FROM=%d TO=%d"
+                    % (cur, next_tool))
+            script.append("RESUME")
+            # 兜底：恢复断料前的加速度/速度限制（RESTORE_GCODE_STATE 不管这些）
+            script.append(restore_vlimit)
+            script.append("M400")
+            self.gcode.run_script("\n".join(script))
+            # RESUME 内部的 RESTORE_GCODE_STATE 会把 gcode 偏移还原成暂停时
+            # (旧热端)的值，覆盖掉 CHANGE_TOOL 为新热端设好的偏移。这里在
+            # RESUME 之后重新应用一次新热端偏移加以抵消。
+            if offsets is not None:
+                offsets.apply(next_tool, base_tool=self.multitool.base_tool)
+        except Exception:
+            # 失败时打印已处于暂停态，记录日志即可，不再抛出。
+            logging.exception("multitool_filament: runout handler error")
+        finally:
+            self._handling_runout = False
+            self._min_event_systime = (
+                self.reactor.monotonic() + self.runout_event_delay)
+
+    def _has_macro(self, name):
+        return name.upper() in self.gcode.gcode_handlers
+
+    def cmd_QUERY_FILAMENT_STATUS(self, gcmd):
+        gcmd.respond_info("====== 耗材检查状态 ======")
+        for ch in range(self.tool_count):
+            st = self._loaded[ch]
+            cn = '未知' if st is None else ('已装载' if st else '已卸载')
+            gcmd.respond_info("通道%d: %s" % (ch, cn))
+        if self.runout_enabled:
+            groups_cn = ', '.join(
+                '[%s]' % ','.join('T%d' % t for t in g) for g in self.groups)
+            gcmd.respond_info("续打组: %s" % groups_cn)
+        else:
+            gcmd.respond_info("续打组: 未配置 (断料仅提示，不自动续打/暂停)")
 
     # ------------------------------------------------------------------
     # 公共方法：被 multitool 主流程在换头前调用
@@ -118,6 +356,8 @@ class MultitoolFilament:
         return {
             'tool_count': self.tool_count,
             'loaded': list(self._loaded),
+            'runout_enabled': self.runout_enabled,
+            'continuation_groups': [list(g) for g in self.groups],
         }
 
 
