@@ -31,6 +31,7 @@
 | `[multitool_offsets]` | 可选 | 各热端 XYZ 偏移管理，支持 Z 自适应基准热端 |
 | `[multitool_clamp]` | 可选 | 基于 buttons helper 的夹紧检测，自动前后置校验 |
 | `[multitool_stats]` | 可选 | 换头计时统计，零钩子嵌入 |
+| `[multitool_filament]` | 可选 | 各热端耗材检测；换头前校验，**支持断料续打**（断料自动切到同组下一个有料热端） |
 
 亮点：
 
@@ -194,6 +195,75 @@ QUERY_CLAMP_STATUS         # 启用了 [multitool_clamp] 时
 | `[multitool_clamp]` | `QUERY_CLAMP_STATUS` | 查询夹紧开关状态 |
 | `[multitool_offsets]` | — | 完全自动，无对外命令 |
 | `[multitool_stats]` | — | 完全自动，无对外命令 |
+| `[multitool_filament]` | `QUERY_FILAMENT_STATUS` | 查询各通道耗材装载状态与续打组 |
+
+---
+
+## 断料续打（continuation_groups）
+
+`[multitool_filament]` 在为每个热端注册耗材开关的同时，支持**断料续打**：
+打印中当前热端断料时，自动切到同组的下一个有料热端继续打印；同组没有可用
+热端时正常暂停。
+
+### 配置续打组
+
+在 `[multitool_filament]` 下加一行 `continuation_groups`，格式 `[a,b,...],[c],[d]`：
+每个方括号是一个**有序**续打组。
+
+```cfg
+[multitool_filament]
+continuation_groups: [1,2],[0],[3]
+pin_0: ^multihotend:IO0
+pin_1: ^multihotend:IO1
+pin_2: ^multihotend:IO2
+pin_3: ^multihotend:IO3
+```
+
+含义（对应上面的 `[1,2],[0],[3]`）：
+
+- T1 打印中断料 → 自动续打到 T2。
+- T2 打印中断料 → 环绕回查 T1（若已补料则续打，否则暂停）。
+- T0 自成一组，没有可切换对象 → 断料直接暂停打印。
+- T3 同理，自成一组 → 断料直接暂停打印。
+- 没列进任何组的热端 → 断料直接暂停打印。
+- 不配置 `continuation_groups` → 断料只在控制台打印提示，不自动续打/暂停（向后兼容）。
+
+> 同一个热端不能出现在多个组里（语义二义，启动会报错）。
+> 组内查找用 `skip` 语义：跳过同样没料的成员，全组都没料才暂停。
+
+### 续打编排与可选钩子
+
+触发续打时，框架自动按下面顺序编排（先暂停，再判断）：
+
+```
+PAUSE
+→ M104 T<新热端> S<旧热端温度>                  # 框架自动：复制旧热端温度到新热端
+→ [multitool_filament_before_swap FROM TO]   # 可选钩子
+→ CHANGE_TOOL T=<下一个热端>                   # 含等温（此时新热端已有目标温度）
+→ M104 T<旧热端> S0                            # 框架自动：换头后关闭旧热端
+→ [multitool_filament_after_swap FROM TO]    # 可选钩子
+→ RESUME
+```
+
+新热端的加热**无需手写钩子**：框架会自动把旧热端的目标温度复制到新热端，
+随后的 `CHANGE_TOOL` 会等温；换头完成后旧热端会被自动关闭（设为 0）。
+
+每热端的 **gcode 偏移也无需手写钩子**：续打用 `PAUSE`/`RESUME` 包裹，而
+`RESUME` 的 `RESTORE_GCODE_STATE` 会把偏移还原成暂停时（旧热端）的值，框架
+已在 `RESUME` 之后自动重新应用新热端偏移加以抵消（需启用 `[multitool_offsets]`）。
+
+> 注意：`RESTORE_GCODE_STATE` **不会**恢复加速度/速度限制（`SET_VELOCITY_LIMIT`
+> 的 `max_accel` 等属于 toolhead 层，不在 gcode state 内）。为此框架已在续打结尾
+> 自动用 `SET_VELOCITY_LIMIT` 把加速度/速度限制写回断料前的值作为兜底，钩子内的
+> 临时改动不会残留到续打后的打印（仍建议钩子尽量不改）。
+
+两个钩子宏都是**可选**的（未定义则跳过），入参 `FROM=<旧热端> TO=<新热端>`：
+
+- `multitool_filament_before_swap`：换头**前**的额外动作（框架已自动设温/等温，无需再设温）。
+- `multitool_filament_after_swap`：换头**后**、`RESUME` 前。常用于新热端
+  上料 / 吹料 / 排废 / Prime，确保续打前出料正常。
+
+> 默认配置 [multitool_config.cfg](multitool_config.cfg) 中给出了两个钩子的注释模板。
 
 ---
 
@@ -250,6 +320,7 @@ klipper-toolchange-stats/
     ├── multitool.py                  # 主模块（T*/UNTOOL/CHANGE_TOOL 编排）
     ├── multitool_clamp.py            # 夹紧检测（可选）
     ├── multitool_offsets.py          # 偏移 + Z 自适应（可选）
+    ├── multitool_filament.py         # 耗材检测 + 断料续打（可选）
     └── multitool_stats.py            # 换头计时统计（可选）
 ```
 
