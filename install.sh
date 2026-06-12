@@ -13,7 +13,8 @@ REPO_URL="${REPO_URL:-https://github.com/null01024/klipper-toolchange-stats.git}
 # 配置在 printer.cfg 中的 include 行（写在文件最顶部）
 INCLUDE_LINE="[include multitool/*.cfg]"
 CONFIG_SUBDIR="multitool"
-CONFIG_FILENAME="multitool_config.cfg"
+# 需要部署到用户配置目录的 cfg 列表（空格分隔，已存在则不覆盖）
+CONFIG_FILES="multitool_config.cfg calibration.cfg"
 
 set -eu
 export LC_ALL=C
@@ -115,18 +116,21 @@ function clean_orphan_links {
 
 function copy_config {
     local target_dir="${CONFIG_PATH}/${CONFIG_SUBDIR}"
-    local target_file="${target_dir}/${CONFIG_FILENAME}"
-    local source_file="${INSTALL_PATH}/${CONFIG_FILENAME}"
 
     echo "[CONFIG] 部署默认配置到 ${target_dir}/"
     mkdir -p "${target_dir}"
 
-    if [ -f "${target_file}" ]; then
-        echo "  -> 已存在 ${CONFIG_FILENAME}，跳过覆盖（保留用户修改）"
-    else
-        cp "${source_file}" "${target_file}"
-        echo "  -> 已复制 ${CONFIG_FILENAME}"
-    fi
+    local cfg target_file source_file
+    for cfg in ${CONFIG_FILES}; do
+        target_file="${target_dir}/${cfg}"
+        source_file="${INSTALL_PATH}/${cfg}"
+        if [ -f "${target_file}" ]; then
+            echo "  -> 已存在 ${cfg}，跳过覆盖（保留用户修改）"
+        else
+            cp "${source_file}" "${target_file}"
+            echo "  -> 已复制 ${cfg}"
+        fi
+    done
 }
 
 function patch_printer_cfg {
@@ -174,18 +178,21 @@ cat <<EOF
 [DONE] 安装完成。
 
 默认配置已部署到：
-    ${CONFIG_PATH}/${CONFIG_SUBDIR}/${CONFIG_FILENAME}
+    ${CONFIG_PATH}/${CONFIG_SUBDIR}/
+        ${CONFIG_FILES}
 
 printer.cfg 顶部已自动加入：
     ${INCLUDE_LINE}
 
 下一步：
-    1. 编辑 ${CONFIG_PATH}/${CONFIG_SUBDIR}/${CONFIG_FILENAME}
+    1. 编辑 ${CONFIG_PATH}/${CONFIG_SUBDIR}/multitool_config.cfg
     2. 修改 [multitool] 字段（tool_count / z_hop / 等）
     3. 替换两个钩子宏（multitool_release_tool / multitool_pickup_tool）
        的实现 —— 默认实现会直接报错以提示你必须替换
-    4. 重启 Klipper：FIRMWARE_RESTART
-    5. 验证：QUERY_TOOL_STATUS
+    4. (可选) 编辑 calibration.cfg：替换 [tools_calibrate] pin 与
+       _TOOL_CALIB_VARS 里的传感器/安全坐标，不用对刀校准可整段删除
+    5. 重启 Klipper：FIRMWARE_RESTART
+    6. 验证：QUERY_TOOL_STATUS
 
 可选: 在 moonraker.conf 中添加 update_manager 以支持 OTA 更新：
 
