@@ -16,6 +16,7 @@
 - [配置文件说明](#配置文件说明)
 - [验证安装](#验证安装)
 - [命令一览](#命令一览)
+- [自动对刀校准](#自动对刀校准tools_calibrate)
 - [moonraker 自动更新](#moonraker-自动更新可选)
 - [旧版用户迁移](#旧版用户迁移)
 - [故障排查](#故障排查)
@@ -32,6 +33,7 @@
 | `[multitool_clamp]` | 可选 | 基于 buttons helper 的夹紧检测，自动前后置校验 |
 | `[multitool_stats]` | 可选 | 换头计时统计，零钩子嵌入 |
 | `[multitool_filament]` | 可选 | 各热端耗材检测；换头前校验，**支持断料续打**（断料自动切到同组下一个有料热端） |
+| `[tools_calibrate]` | 可选 | 喷嘴接触式自动对刀校准（来自上游 viesturz/klipper-toolchanger），配合 `CALIBRATE_TOOL` 宏自动写入各热端偏移 |
 
 亮点：
 
@@ -196,6 +198,10 @@ QUERY_CLAMP_STATUS         # 启用了 [multitool_clamp] 时
 | `[multitool_offsets]` | — | 完全自动，无对外命令 |
 | `[multitool_stats]` | — | 完全自动，无对外命令 |
 | `[multitool_filament]` | `QUERY_FILAMENT_STATUS` | 查询各通道耗材装载状态与续打组 |
+| `calibration.cfg` | `CALIBRATE_TOOL TOOL=<n>` | 校准单个工具（T0 设基准，其余测相对偏移并落盘） |
+| `calibration.cfg` | `CALIBRATE_ALL_TOOLS` | 批量校准全部工具 |
+| `[tools_calibrate]` | `TOOL_LOCATE_SENSOR` | 定位对刀传感器中心（用 T0 调用） |
+| `[tools_calibrate]` | `TOOL_CALIBRATE_TOOL_OFFSET` | 测当前工具相对 T0 的偏移 |
 
 ---
 
@@ -293,6 +299,37 @@ PAUSE
 
 ---
 
+## 自动对刀校准（tools_calibrate）
+
+本项目内置了喷嘴接触式自动对刀能力，由两部分组成：
+
+- `klipper/extras/tools_calibrate.py`：**vendoring 自上游
+  [viesturz/klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger)**
+  （`klipper/extras/tools_calibrate.py`，GPLv3）。自包含，仅依赖 Klipper 标准对象，
+  **不需要**上游的 `toolchanger.py` / `tool.py` 等其它文件。
+- [calibration.cfg](calibration.cfg)：本仓库提供的校准编排宏（`CALIBRATE_TOOL` /
+  `CALIBRATE_ALL_TOOLS`），`install.sh` 会自动把它部署到
+  `~/printer_data/config/multitool/`，由 `[include multitool/*.cfg]` 自动加载。
+
+### 工作流程
+
+1. 编辑 `calibration.cfg`：替换 `[tools_calibrate] pin` 为你的对刀器引脚，并按机器
+   实测填写 `_TOOL_CALIB_VARS` 里的传感器中心坐标、安全坐标、`tool_count`。
+2. 执行 `CALIBRATE_ALL_TOOLS`（或逐个 `CALIBRATE_TOOL TOOL=<n>`）。
+3. T0 作为基准（偏移锁 0），其余工具测出相对 T0 的 XYZ 偏移。
+
+### 与偏移系统的衔接
+
+校准结果通过 `SAVE_VARIABLE` 写入 `t{n}_offset_x/y/z`，这正是
+[`klipper/extras/multitool_offsets.py`](klipper/extras/multitool_offsets.py)
+读取偏移所用的字段（默认前缀 `t`）。因此**校准完成后无需手动搬运数据**，启用
+`[multitool_offsets]` 即可在换头时自动应用各热端偏移。
+
+> 不需要对刀校准时，删除 `multitool/calibration.cfg` 即可；`tools_calibrate.py`
+> 不被任何 cfg 引用时不会加载，无副作用。
+
+---
+
 ## moonraker 自动更新（可选）
 
 在 `moonraker.conf` 中添加：
@@ -342,12 +379,14 @@ klipper-toolchange-stats/
 ├── install.sh                          # 软链 .py 到 ~/klipper/klippy/extras/
 │                                       # 并把默认配置部署到用户配置目录
 ├── multitool_config.cfg               # 默认配置（含两个钩子的报错占位实现）
+├── calibration.cfg                    # 对刀校准编排宏（可选，自动部署）
 └── klipper/extras/
     ├── multitool.py                  # 主模块（T*/UNTOOL/CHANGE_TOOL 编排）
     ├── multitool_clamp.py            # 夹紧检测（可选）
     ├── multitool_offsets.py          # 偏移 + Z 自适应（可选）
     ├── multitool_filament.py         # 耗材检测 + 断料续打（可选）
-    └── multitool_stats.py            # 换头计时统计（可选）
+    ├── multitool_stats.py            # 换头计时统计（可选）
+    └── tools_calibrate.py            # 自动对刀校准（vendoring 自 viesturz/klipper-toolchanger, GPLv3）
 ```
 
 ---
@@ -355,3 +394,7 @@ klipper-toolchange-stats/
 ## License
 
 仓库内未声明的源码遵循其原始上游许可证；本仓库新增内容默认 MIT。
+
+`klipper/extras/tools_calibrate.py` vendoring 自
+[viesturz/klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger)，
+遵循其原始 **GPLv3** 许可证，版权归原作者所有。
