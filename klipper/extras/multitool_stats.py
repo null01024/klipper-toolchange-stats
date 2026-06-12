@@ -105,8 +105,11 @@ class MultitoolStats:
     #   - 离开 printing → 自动输出报告
     # ------------------------------------------------------------------
     def _on_print_state_changed(self, prev, cur):
-        # 进入打印态：清空本次打印统计
-        if cur in PRINTING_STATES and prev not in PRINTING_STATES:
+        # 进入打印态：清空本次打印统计。
+        # 'paused' -> 'printing' 是续打/手动恢复，不算新打印开始，
+        # 否则会在续打/恢复后误清空本次打印统计。
+        if (cur in PRINTING_STATES and prev not in PRINTING_STATES
+                and prev != 'paused'):
             self._print = self._empty_stats()
             self._reset_current()
             self.gcode.respond_info(

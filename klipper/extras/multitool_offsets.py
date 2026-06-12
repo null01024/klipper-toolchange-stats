@@ -67,8 +67,12 @@ class MultitoolOffsets:
     # ------------------------------------------------------------------
     def _on_print_state_changed(self, prev_state, cur_state):
         self._last_print_state = cur_state
+        # 仅识别"真正的开始"(standby/complete/None -> printing)；
+        # 'paused' -> 'printing' 是续打/手动恢复，不重置基准（否则会丢掉
+        # 本次打印的基准热端，使续打后的喷嘴 Z 偏移按错误基准重算）。
         if (cur_state in PRINTING_STATES
-                and prev_state not in PRINTING_STATES):
+                and prev_state not in PRINTING_STATES
+                and prev_state != 'paused'):
             # 进入打印态，清空基准让首次 pickup 自动接管
             tc = self.printer.lookup_object('multitool', None)
             if tc is not None and tc.base_tool != -1:
