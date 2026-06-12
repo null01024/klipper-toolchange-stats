@@ -34,10 +34,18 @@
 #   - 当前热端不在任何组 / 组里只有它自己 / 全组都没料 → 正常 PAUSE 暂停。
 #   - 仅在配置了 continuation_groups 时启用；不配置则维持"只打印提示"。
 #
+# 断料后延后续打 (runout_continue_length)：
+#   - 断料触发后不立即暂停，而是让打印继续，直到挤出机净送料达到配置长度(mm)，
+#     再触发上面的暂停/续打流程，用于消耗料管(传感器→喷嘴)内的残余耗材。
+#   - 净送料量 = toolhead 挤出机轴绝对坐标的增量(回抽自动抵消)。
+#   - 0 = 关闭(立即触发，向后兼容)。延后期间若手动暂停/补料/换头/打印结束，
+#     自动取消倒计时。
+#
 # 配置示例 (tool_count=4 时需配 pin_0..pin_3)：
 #   [multitool_filament]
 #   boot_grace_s: 5
 #   continuation_groups: [1,2],[0],[3]
+#   runout_continue_length: 50      # 断料后再消耗 50mm 耗材才触发续打 (0=立即)
 #   pin_0: ^multihotend:IO0
 #   pin_1: ^multihotend:IO1
 #   pin_2: ^multihotend:IO2
@@ -66,6 +74,16 @@ class MultitoolFilament:
         self.runout_event_delay = config.getfloat(
             'runout_event_delay', RUNOUT_EVENT_DELAY, minval=0.)
 
+        # ---- 断料后延后续打 ----
+        # runout_continue_length: 断料触发后，先让打印继续，直到挤出机净送料
+        #   达到该长度(mm)再触发暂停/续打，用于消耗料管(传感器→喷嘴)内的残余
+        #   耗材。0 = 关闭(立即触发，向后兼容)。
+        # runout_continue_poll_s: 延后期间轮询挤出机位置的间隔(秒)。
+        self.runout_continue_length = config.getfloat(
+            'runout_continue_length', 0., minval=0.)
+        self.continue_poll_s = config.getfloat(
+            'runout_continue_poll_s', 0.3, minval=0.05)
+
         # ---- 续打组解析 ----
         # self.groups: list[list[int]]   原始组定义（保留顺序）
         # self._group_of: dict[int, list[int]]  tool -> 其所在组
@@ -77,6 +95,14 @@ class MultitoolFilament:
         # ---- 断料处理运行时守卫 ----
         self._handling_runout = False
         self._min_event_systime = 0.
+
+        # ---- 延后续打运行时状态 ----
+        # _continue_timer: 轮询挤出机位置的 reactor 定时器(None=未启动)
+        # _continue_baseline: 触发瞬间的挤出机轴绝对坐标 (toolhead E)
+        # _continue_tool: 触发时正在打印的热端编号，用于中途换头检测
+        self._continue_timer = None
+        self._continue_baseline = 0.
+        self._continue_tool = -1
 
         buttons = self.printer.load_object(config, 'buttons')
 
@@ -186,14 +212,83 @@ class MultitoolFilament:
                 and not self._handling_runout
                 and eventtime >= self._min_event_systime
                 and self._is_printing(eventtime)):
-            self._handling_runout = True
-            self.reactor.register_callback(self._runout_event_handler)
+            # 配了延后长度 → 先继续打印消耗料管残料，达到长度再触发；
+            # 否则维持原行为：立即触发暂停/续打。
+            if self.runout_continue_length > 0.:
+                self._begin_continue(eventtime, channel)
+            else:
+                self._handling_runout = True
+                self.reactor.register_callback(self._runout_event_handler)
 
     def _is_printing(self, eventtime):
         ps = self.printer.lookup_object('print_stats', None)
         if ps is None:
             return False
         return ps.get_status(eventtime).get('state') == 'printing'
+
+    # ------------------------------------------------------------------
+    # 延后续打：读取挤出机轴绝对坐标 (toolhead E)。
+    #   gcode_move 在 G92 后只调整 base_position，不重置 toolhead 命令坐标，
+    #   故该值在打印过程中连续累积；其增量即净送料量(回抽自动抵消)。
+    # ------------------------------------------------------------------
+    def _extruder_axis_pos(self):
+        toolhead = self.printer.lookup_object('toolhead')
+        return toolhead.get_position()[3]
+
+    # ------------------------------------------------------------------
+    # 启动延后续打：记录基准 E 与当前热端，置守卫，开轮询定时器。
+    #   守卫 _handling_runout=True 占位，阻止延后期间重复触发。
+    # ------------------------------------------------------------------
+    def _begin_continue(self, eventtime, channel):
+        if self._continue_timer is not None:
+            return
+        self._handling_runout = True
+        self._continue_tool = channel
+        self._continue_baseline = self._extruder_axis_pos()
+        self.gcode.respond_info(
+            "[断料续打] 通道%d 断料，继续使用 %.1fmm 耗材后再触发续打/暂停..."
+            % (channel, self.runout_continue_length))
+        self._continue_timer = self.reactor.register_timer(
+            self._continue_poll, eventtime + self.continue_poll_s)
+
+    # ------------------------------------------------------------------
+    # 延后续打轮询：达到长度则触发续打；中途状态变化则取消。
+    # ------------------------------------------------------------------
+    def _continue_poll(self, eventtime):
+        try:
+            cur = self.multitool.current_tool
+            # 中止条件：已暂停/换头中/热端变了/已补料/打印结束
+            if (self.multitool.active
+                    or cur != self._continue_tool
+                    or self._loaded[self._continue_tool]
+                    or not self._is_printing(eventtime)):
+                self._cancel_continue()
+                return self.reactor.NEVER
+
+            consumed = self._extruder_axis_pos() - self._continue_baseline
+            if consumed >= self.runout_continue_length:
+                self.gcode.respond_info(
+                    "[断料续打] 已消耗约 %.1fmm，触发续打/暂停。" % consumed)
+                self._continue_timer = None
+                # 守卫仍为 True，交给 _runout_event_handler 在 finally 复位
+                self.reactor.register_callback(self._runout_event_handler)
+                return self.reactor.NEVER
+        except Exception:
+            logging.exception("multitool_filament: continue poll error")
+            self._cancel_continue()
+            return self.reactor.NEVER
+        return eventtime + self.continue_poll_s
+
+    # ------------------------------------------------------------------
+    # 取消延后续打：注销定时器、复位守卫与去抖窗。
+    # ------------------------------------------------------------------
+    def _cancel_continue(self):
+        self._continue_timer = None
+        self._handling_runout = False
+        self._min_event_systime = (
+            self.reactor.monotonic() + self.runout_event_delay)
+        self.gcode.respond_info(
+            "[断料续打] 延后续打已取消 (补料/暂停/换头/打印结束)。")
 
     # ------------------------------------------------------------------
     # 在 cur 所在续打组里，从 cur 之后按顺序(环绕)找下一个"有料"的热端。
@@ -324,6 +419,12 @@ class MultitoolFilament:
             groups_cn = ', '.join(
                 '[%s]' % ','.join('T%d' % t for t in g) for g in self.groups)
             gcmd.respond_info("续打组: %s" % groups_cn)
+            if self.runout_continue_length > 0.:
+                gcmd.respond_info(
+                    "延后续打: 断料后再消耗 %.1fmm 耗材才触发"
+                    % self.runout_continue_length)
+            else:
+                gcmd.respond_info("延后续打: 关闭 (断料立即触发)")
         else:
             gcmd.respond_info("续打组: 未配置 (断料仅提示，不自动续打/暂停)")
 
@@ -358,6 +459,7 @@ class MultitoolFilament:
             'loaded': list(self._loaded),
             'runout_enabled': self.runout_enabled,
             'continuation_groups': [list(g) for g in self.groups],
+            'runout_continue_length': self.runout_continue_length,
         }
 
 
