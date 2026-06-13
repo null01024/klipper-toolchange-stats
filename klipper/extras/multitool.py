@@ -200,7 +200,16 @@ class Multitool:
         if new_tool == old_tool:
             cur_cn = "无热端" if new_tool == -1 else "T%d" % new_tool
             gcmd.respond_info(
-                "目标状态与当前一致 (%s)，无需操作" % cur_cn)
+                "目标状态与当前一致 (%s)，无需机械换头" % cur_cn)
+            # 即便无需机械动作，仍需刷新该热端偏移：打印开始时若打印头已挂载
+            # 热端，切片器发出的首条 T 指令与当前热端相同，会命中此早退分支，
+            # 导致该热端偏移未应用、且自适应基准热端未建立（base 仍为 -1，被
+            # 后续真正的换头错误地设成别的热端）。这里对已挂载热端补一次
+            # apply()——在命令上下文中执行，安全；base=-1 时由 apply() 自动把
+            # 当前热端设为基准，符合"首个使用的热端作为基准"的语义。
+            offsets = self.printer.lookup_object('multitool_offsets', None)
+            if new_tool != -1 and offsets is not None:
+                offsets.apply(new_tool, base_tool=self.base_tool)
             return
 
         if new_tool == -1:
