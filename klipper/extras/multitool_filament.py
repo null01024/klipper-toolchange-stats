@@ -165,6 +165,9 @@ class MultitoolFilament:
         self.gcode.register_command(
             'QUERY_FILAMENT_STATUS', self.cmd_QUERY_FILAMENT_STATUS,
             desc='查询各通道耗材装载状态与续打组')
+        self.gcode.register_command(
+            'CHECK_PRINT_FILAMENT', self.cmd_CHECK_PRINT_FILAMENT,
+            desc='打印前检查 TOOLS 指定通道是否都有耗材，缺料则报错中止')
 
     def _on_ready(self):
         # 启动后等 boot_grace_s 秒，让 buttons helper 把当前电平上报完，
@@ -408,6 +411,77 @@ class MultitoolFilament:
 
     def _has_macro(self, name):
         return name.upper() in self.gcode.gcode_handlers
+
+    # ------------------------------------------------------------------
+    # 解析打印前检查的通道列表
+    #   输入形如 "0,1,2," (切片器常带尾随逗号)，输出去重保序的 int 列表。
+    #   - 忽略空段 / 空白
+    #   - 非数字 / 越界 (不在 0..tool_count-1) → 抛 command_error
+    # ------------------------------------------------------------------
+    def _parse_tool_list(self, raw):
+        tools = []
+        seen = set()
+        for part in (raw or '').split(','):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                idx = int(part)
+            except ValueError:
+                raise self.printer.command_error(
+                    "[耗材检查] CHECK_PRINT_FILAMENT TOOLS 含非数字: %r" % part)
+            if idx < 0 or idx >= self.tool_count:
+                raise self.printer.command_error(
+                    "[耗材检查] CHECK_PRINT_FILAMENT TOOLS 中的通道 %d 越界 "
+                    "(应在 0..%d)" % (idx, self.tool_count - 1))
+            if idx not in seen:
+                seen.add(idx)
+                tools.append(idx)
+        return tools
+
+    # ------------------------------------------------------------------
+    # 打印前耗材检查：由用户在 PRINT_START 中调用
+    #   CHECK_PRINT_FILAMENT TOOLS=0,1,2
+    #   - 逐通道输出状态总览
+    #   - 任一所需通道明确无耗材 (False) → 抛 command_error 中止 PRINT_START
+    #   - 状态未知 (None) 沿用 assert_loaded 哲学：仅警告，不阻塞
+    # ------------------------------------------------------------------
+    def cmd_CHECK_PRINT_FILAMENT(self, gcmd):
+        tools = self._parse_tool_list(gcmd.get('TOOLS', ''))
+        if not tools:
+            gcmd.respond_info(
+                "[打印前耗材检查] 未指定本次打印使用的通道 (TOOLS 为空)，"
+                "跳过检查。")
+            return
+
+        lines = []
+        missing = []
+        unknown = []
+        for ch in tools:
+            st = self._loaded[ch]
+            cn = '未知' if st is None else ('已装载' if st else '已卸载')
+            lines.append("通道%d=%s" % (ch, cn))
+            if st is None:
+                unknown.append(ch)
+            elif not st:
+                missing.append(ch)
+        gcmd.respond_info(
+            "[打印前耗材检查] 本次使用通道: %s" % ', '.join(lines))
+
+        if unknown:
+            gcmd.respond_info(
+                "[打印前耗材检查] 警告: 通道 %s 启动后未收到状态上报，"
+                "按有耗材处理。若与实际不符请检查 pin 接线 / 电平修饰符 "
+                "(! ^ ~)。" % ', '.join('%d' % c for c in unknown))
+
+        if missing:
+            msg = ("[打印前耗材检查] 通道 %s 无耗材，已中止打印。"
+                   "请装料后重新开始。"
+                   % ', '.join('%d' % c for c in missing))
+            gcmd.respond_info(msg)
+            raise self.printer.command_error(msg)
+
+        gcmd.respond_info("[打印前耗材检查] 所有所需通道均已装料，检查通过。")
 
     def cmd_QUERY_FILAMENT_STATUS(self, gcmd):
         gcmd.respond_info("====== 耗材检查状态 ======")
