@@ -198,10 +198,48 @@ QUERY_CLAMP_STATUS         # 启用了 [multitool_clamp] 时
 | `[multitool_offsets]` | — | 完全自动，无对外命令 |
 | `[multitool_stats]` | — | 完全自动，无对外命令 |
 | `[multitool_filament]` | `QUERY_FILAMENT_STATUS` | 查询各通道耗材装载状态与续打组 |
+| `[multitool_filament]` | `CHECK_PRINT_FILAMENT TOOLS=<list>` | 打印前检查 `TOOLS` 指定通道是否都有耗材，缺料则报错中止打印 |
 | `calibration.cfg` | `CALIBRATE_TOOL TOOL=<n>` | 校准单个工具（T0 设基准，其余测相对偏移并落盘） |
 | `calibration.cfg` | `CALIBRATE_ALL_TOOLS` | 批量校准全部工具 |
 | `[tools_calibrate]` | `TOOL_LOCATE_SENSOR` | 定位对刀传感器中心（用 T0 调用） |
 | `[tools_calibrate]` | `TOOL_CALIBRATE_TOOL_OFFSET` | 测当前工具相对 T0 的偏移 |
+
+---
+
+## 打印前耗材检查（CHECK_PRINT_FILAMENT）
+
+打印开始前，先确认本次任务用到的每个通道都装好了料：缺料就直接报错中止，
+避免打到一半才发现某通道没料。
+
+### 命令
+
+```
+CHECK_PRINT_FILAMENT TOOLS=0,1,2
+```
+
+- `TOOLS`：本次打印用到的通道列表，逗号分隔（允许尾随逗号 / 空白）。
+- 逐通道输出状态总览（`已装载 / 已卸载 / 未知`）。
+- 任一所需通道明确**无耗材** → 抛错，使调用它的 `PRINT_START` 宏中断，打印不会开始。
+- 通道状态**未知**（启动后从未上报电平，实际打印时几乎不出现）→ 仅警告、不阻塞。
+- `TOOLS` 为空 → 跳过检查（兼容单色 / 未传参）。
+
+### 与切片器 / PRINT_START 集成
+
+切片器（OrcaSlicer / PrusaSlicer 等）的 start gcode 把用到的通道拼成 `TOOLS`：
+
+```gcode
+PRINT_START ... TOOLS="{if is_extruder_used[0]}0,{endif}{if is_extruder_used[1]}1,{endif}{if is_extruder_used[2]}2,{endif}{if is_extruder_used[3]}3,{endif}"
+```
+
+在你自己的 `PRINT_START` 宏开头加一行（仅一行，不影响原有逻辑）：
+
+```cfg
+[gcode_macro PRINT_START]
+gcode:
+    {% set tools = params.TOOLS|default('') %}
+    CHECK_PRINT_FILAMENT TOOLS={tools}
+    # ... 其余原有逻辑 ...
+```
 
 ---
 
