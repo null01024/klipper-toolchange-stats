@@ -289,6 +289,17 @@ pin_3: ^multihotend:IO3
 
 换头到某个工具前，主流程会自动检查对应通道是否有料。未启用 `[multitool_filament]` 时，换头不会做耗材检查。
 
+#### Spoolman 通道映射
+
+前端可通过 `SET_TOOL_SPOOL_ID` 为每个工具通道关联 Spoolman 料盘 ID：
+
+```gcode
+SET_TOOL_SPOOL_ID TOOL=0 SPOOL_ID=123
+SET_TOOL_SPOOL_ID TOOL=0 SPOOL_ID=0   # 清除关联
+```
+
+映射会持久化到 `[save_variables]`，变量名为 `tool_0_spool_id`、`tool_1_spool_id` 等；`0` 表示未分配料盘。`QUERY_FILAMENT_STATUS` 会同时输出每个通道的耗材状态和 Spoolman ID。
+
 #### 打印前耗材检查
 
 可在 `PRINT_START` 开头调用：
@@ -427,6 +438,7 @@ CALIBRATE_ALL_TOOLS
 | `QUERY_CLAMP_STATUS` | `[multitool_clamp]` | 查询夹紧开关状态 |
 | `QUERY_FILAMENT_STATUS` | `[multitool_filament]` | 查询各通道耗材和续打组 |
 | `CHECK_PRINT_FILAMENT TOOLS=0,1` | `[multitool_filament]` | 打印前检查指定通道耗材 |
+| `SET_TOOL_SPOOL_ID TOOL=<n> SPOOL_ID=<id>` | `[multitool_filament]` | 设置通道的 Spoolman 料盘 ID，`0` 表示清除 |
 | `CALIBRATE_TOOL TOOL=<n>` | `calibration.cfg` | 校准单个工具 |
 | `CALIBRATE_ALL_TOOLS` | `calibration.cfg` | 依次校准全部工具 |
 | `TOOL_LOCATE_SENSOR` | `[tools_calibrate]` | 用 T0 定位对刀传感器 |
