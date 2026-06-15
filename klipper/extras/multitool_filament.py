@@ -57,6 +57,7 @@ import re
 # 断料事件去抖窗口（秒）：一次断料处理后，此时间内不再重复触发，
 # 避免开关抖动 / 换头过程中的电平变化引发二次续打。
 RUNOUT_EVENT_DELAY = 3.
+SPOOL_ID_VAR_TMPL = 'tool_%d_spool_id'
 
 
 class MultitoolFilament:
@@ -108,6 +109,8 @@ class MultitoolFilament:
 
         # 各通道装载状态：None 表示尚未收到任何上报
         self._loaded = [None] * self.tool_count
+        # 各通道 Spoolman 料盘 ID：0 表示未分配
+        self._spool_ids = [0] * self.tool_count
 
         for ch in range(self.tool_count):
             pin = config.get('pin_%d' % ch)
@@ -168,14 +171,37 @@ class MultitoolFilament:
         self.gcode.register_command(
             'CHECK_PRINT_FILAMENT', self.cmd_CHECK_PRINT_FILAMENT,
             desc='打印前检查 TOOLS 指定通道是否都有耗材，缺料则报错中止')
+        self.gcode.register_command(
+            'SET_TOOL_SPOOL_ID', self.cmd_SET_TOOL_SPOOL_ID,
+            desc='设置工具通道的 Spoolman 料盘 ID')
 
     def _on_ready(self):
+        self._load_spool_ids()
         # 启动后等 boot_grace_s 秒，让 buttons helper 把当前电平上报完，
         # 再把仍为 None 的通道落定为"已卸载"并输出一份状态总览。
         reactor = self.printer.get_reactor()
         reactor.register_callback(
             self._seed_and_report,
             reactor.monotonic() + self.boot_grace_s)
+
+    def _load_spool_ids(self):
+        sv = self.printer.lookup_object('save_variables', None)
+        if sv is None:
+            return
+        values = getattr(sv, 'allVariables', {}) or {}
+        for tool in range(self.tool_count):
+            try:
+                self._spool_ids[tool] = int(
+                    values.get(SPOOL_ID_VAR_TMPL % tool, 0) or 0)
+            except (TypeError, ValueError):
+                self._spool_ids[tool] = 0
+
+    def _persist_spool_id(self, tool):
+        if self.printer.lookup_object('save_variables', None) is None:
+            return
+        self.gcode.run_script_from_command(
+            "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
+            % (SPOOL_ID_VAR_TMPL % tool, self._spool_ids[tool]))
 
     def _seed_and_report(self, _eventtime):
         for ch in range(self.tool_count):
@@ -488,7 +514,9 @@ class MultitoolFilament:
         for ch in range(self.tool_count):
             st = self._loaded[ch]
             cn = '未知' if st is None else ('已装载' if st else '已卸载')
-            gcmd.respond_info("通道%d: %s" % (ch, cn))
+            gcmd.respond_info(
+                "通道%d: %s, Spoolman ID=%d"
+                % (ch, cn, self._spool_ids[ch]))
         if self.runout_enabled:
             groups_cn = ', '.join(
                 '[%s]' % ','.join('T%d' % t for t in g) for g in self.groups)
@@ -501,6 +529,18 @@ class MultitoolFilament:
                 gcmd.respond_info("延后续打: 关闭 (断料立即触发)")
         else:
             gcmd.respond_info("续打组: 未配置 (断料仅提示，不自动续打/暂停)")
+
+    def cmd_SET_TOOL_SPOOL_ID(self, gcmd):
+        tool = gcmd.get_int('TOOL', minval=0, maxval=self.tool_count - 1)
+        spool_id = gcmd.get_int('SPOOL_ID', minval=0)
+        self._spool_ids[tool] = spool_id
+        self._persist_spool_id(tool)
+        if spool_id:
+            gcmd.respond_info(
+                "[耗材检查] 通道%d 已关联 Spoolman ID=%d"
+                % (tool, spool_id))
+        else:
+            gcmd.respond_info("[耗材检查] 通道%d 已清除 Spoolman 料盘关联" % tool)
 
     # ------------------------------------------------------------------
     # 公共方法：被 multitool 主流程在换头前调用
@@ -531,6 +571,7 @@ class MultitoolFilament:
         return {
             'tool_count': self.tool_count,
             'loaded': list(self._loaded),
+            'spool_ids': list(self._spool_ids),
             'runout_enabled': self.runout_enabled,
             'continuation_groups': [list(g) for g in self.groups],
             'runout_continue_length': self.runout_continue_length,
