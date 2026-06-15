@@ -1,65 +1,83 @@
 # klipper-toolchange-stats
 
-通用的 Klipper **多热端 / 多头切换插件**。一站式提供：换头编排、夹紧检测、
-偏移管理、换头计时统计。把"机型无关的编排"全部托管在 Python extras 里，
-用户只需写**两个钩子宏**即可接入任意多头机器。
+Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当前热端状态保存、偏移应用、夹紧检测、换头统计、耗材检测、断料续打和自动对刀校准；用户只需要在配置中实现两个机械动作钩子。
 
-> 本仓库由旧版 `klipper-toolchange-stats`（仅含 `[multitool_stats]` 计时统计）
-> 演进而来。计时模块已合并为 `[multitool_stats]`，**历史持久化数据自动延续**。
-
----
+> 本插件不重写 `M109`。如果你希望 `M109 S...` 在未指定 `T` 时自动作用于当前热端，请在自己的配置中单独实现 `M109` 宏。
 
 ## 目录
 
-- [功能特性](#功能特性)
-- [快速开始](#快速开始)
-- [配置文件说明](#配置文件说明)
-- [验证安装](#验证安装)
-- [命令一览](#命令一览)
-- [自动对刀校准](#自动对刀校准tools_calibrate)
-- [moonraker 自动更新](#moonraker-自动更新可选)
-- [旧版用户迁移](#旧版用户迁移)
-- [故障排查](#故障排查)
-- [项目结构](#项目结构)
+- [1. 项目介绍](#1-项目介绍)
+- [1.1 适用范围](#11-适用范围)
+- [1.2 功能列表](#12-功能列表)
+- [2. 安装方法](#2-安装方法)
+- [3. 功能配置](#3-功能配置)
+- [3.1 核心配置](#31-核心配置)
+- [3.2 换头钩子配置](#32-换头钩子配置)
+- [3.3 偏移管理配置](#33-偏移管理配置)
+- [3.4 夹紧检测配置](#34-夹紧检测配置)
+- [3.5 换头统计配置](#35-换头统计配置)
+- [3.6 耗材检测与断料续打配置](#36-耗材检测与断料续打配置)
+- [3.7 自动对刀校准配置](#37-自动对刀校准配置)
+- [4. 常用命令](#4-常用命令)
+- [5. 安装验证](#5-安装验证)
+- [6. 故障排查](#6-故障排查)
+- [7. 更新迁移与许可证](#7-更新迁移与许可证)
 
----
+## 1. 项目介绍
 
-## 功能特性
+`klipper-toolchange-stats` 是一组 Klipper extras 插件和默认配置模板，用于管理多热端、多工具头机器的换头流程。
 
-| 模块 | 必填 | 作用 |
-|---|---|---|
-| `[multitool]` | ✅ | 主模块，自动注册 `T0..T{n-1}` / `UNTOOL` / `CHANGE_TOOL`，并维护 `current_tool` 状态恢复 |
-| `[multitool_offsets]` | 可选 | 各热端 XYZ 偏移管理，支持 Z 自适应基准热端 |
-| `[multitool_clamp]` | 可选 | 基于 buttons helper 的夹紧检测，自动前后置校验 |
-| `[multitool_stats]` | 可选 | 换头计时统计，零钩子嵌入 |
-| `[multitool_filament]` | 可选 | 各热端耗材检测；换头前校验，**支持断料续打**（断料自动切到同组下一个有料热端） |
-| `[tools_calibrate]` | 可选 | 喷嘴接触式自动对刀校准（来自上游 viesturz/klipper-toolchanger），配合 `CALIBRATE_TOOL` 宏自动写入各热端偏移 |
+插件的核心思路是把机型无关的流程交给 Python 模块处理：
 
-亮点：
+- 注册 `T0..T{n-1}`、`UNTOOL`、`CHANGE_TOOL` 等命令。
+- 在换头时自动抬 Z、临时切换加速度、调用用户机械钩子、等待热端温度、恢复状态。
+- 自动维护 `current_tool`，并通过 `[save_variables]` 持久化。
+- 可选启用偏移、夹紧、统计、耗材检测、断料续打、自动对刀等模块。
 
-- **声明即启用**：在 `printer.cfg` 中写一行 `[multitool_xxx]` 即开启对应能力。
-- **极简钩子**：只实现 `multitool_release_tool` / `multitool_pickup_tool` 两个宏，写纯机械动作即可，夹紧检测/计时/偏移/落盘**全部由插件自动嵌入**。
-- **T\* 自动注册**：`tool_count: 4` 即注册 T0~T3；改一个数字即可适配 8 头机器，无需手写 `[gcode_macro Tn]`。
-- **状态外露**：`printer.multitool.current_tool` 等可被 Mainsail / Fluidd / 任意宏直接读取。
-- **不重写 M109**：M109 处理保留给用户自行决定（如需"无 T 时作用于当前热端"，自行写宏覆盖）。
+用户只需要在 `multitool_release_tool` 和 `multitool_pickup_tool` 两个宏里写自己机器的真实机械动作。
 
----
+### 1.1 适用范围
 
-## 快速开始
+适合：
+
+- Klipper 多热端、多工具头、多喷头或工具坞机器。
+- 需要用 `T0`、`T1` 这类命令切换工具的机器。
+- 希望在换头流程中自动处理夹紧检测、XYZ 偏移、耗材检查和换头计时的配置。
+- 使用接触式传感器做多工具头自动对刀的机器。
+
+不适合：
+
+- 只有单热端且不需要工具切换的普通机器。
+- 已经有完整工具切换框架，且不希望替换 `Tn` / `UNTOOL` / `CHANGE_TOOL` 命令的配置。
+- 无法通过 G-code 宏描述工具放回和抓取动作的机械结构。
+
+### 1.2 功能列表
+
+| 模块 | 是否必需 | 功能 |
+|---|---:|---|
+| `[multitool]` | 必需 | 主模块，注册换头命令并编排换头流程 |
+| `[multitool_offsets]` | 可选 | 自动应用各热端 XYZ 偏移，支持 Z 自适应基准 |
+| `[multitool_clamp]` | 可选 | 夹紧开关检测，换头前后自动校验 |
+| `[multitool_stats]` | 可选 | 自动统计换头次数、总耗时、阶段耗时 |
+| `[multitool_filament]` | 可选 | 各热端耗材检测、打印前检查、断料续打 |
+| `[tools_calibrate]` | 可选 | 接触式自动对刀校准，配合 `calibration.cfg` 写入偏移 |
+
+未配置某个可选 section 时，对应功能不会加载，也不会参与换头流程。
+
+## 2. 安装方法
 
 ### 前置条件
 
-1. 已经安装并运行 Klipper（任何近版本）。
-2. `printer.cfg` 中配置了 `[save_variables]`（用于持久化 current_tool / 偏移 / 统计）：
+确认 Klipper 已安装并运行，且 `printer.cfg` 中已经配置 `[save_variables]`：
 
-   ```cfg
-   [save_variables]
-   filename: ~/printer_data/config/myvariables.cfg
-   ```
+```cfg
+[save_variables]
+filename: ~/printer_data/config/myvariables.cfg
+```
 
-### 一键安装（推荐）
+### 一键安装
 
-通过 SSH 在打印机上执行：
+在打印机 SSH 终端执行：
 
 ```bash
 wget -O - https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install.sh | bash
@@ -70,307 +88,439 @@ wget -O - https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/m
 ```bash
 git clone https://github.com/null01024/klipper-toolchange-stats ~/klipper-toolchange-stats
 cd ~/klipper-toolchange-stats
-./install.sh
+bash install.sh
 ```
 
-`install.sh` 会自动：
-- 软链 `klipper/extras/*.py` 到 `~/klipper/klippy/extras/`
-- 把默认配置 [multitool_config.cfg](multitool_config.cfg) 复制到 `~/printer_data/config/multitool/`（已存在则保留不覆盖）
-- 在 `printer.cfg` 顶部插入 `[include multitool/*.cfg]`（已存在则跳过；首次注入会备份为 `printer.cfg.bak.multitool`）
-- 重启 `klipper` 服务
+### 安装脚本会做什么
 
-> 默认路径 `KLIPPER_PATH=~/klipper`、`INSTALL_PATH=~/klipper-toolchange-stats`、`CONFIG_PATH=~/printer_data/config`，可通过环境变量覆盖。
+`install.sh` 的默认路径如下：
 
----
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `KLIPPER_PATH` | `~/klipper` | Klipper 源码目录 |
+| `INSTALL_PATH` | `~/klipper-toolchange-stats` | 本插件仓库目录 |
+| `CONFIG_PATH` | `~/printer_data/config` | Klipper 配置目录 |
+| `REPO_URL` | GitHub 仓库地址 | 一键安装时使用的仓库地址 |
+| `FORCE` | `0` | extras 同名文件冲突时，设为 `1` 可强制备份并覆盖 |
 
-## 配置文件说明
+可以在命令前覆盖这些变量：
 
-安装脚本部署的 `~/printer_data/config/multitool/multitool_config.cfg` 内容如下（节选）：
+```bash
+CONFIG_PATH=~/printer_data/config KLIPPER_PATH=~/klipper bash install.sh
+```
+
+脚本会自动执行：
+
+- 检查不要以 `root` 身份运行。
+- 检查 `klipper.service`、Klipper 源码目录和配置目录是否存在。
+- 如果 `INSTALL_PATH` 不存在，则克隆 `REPO_URL`。
+- 将 `klipper/extras/*.py` 软链到 `~/klipper/klippy/extras/`。
+- 清理指向本仓库 extras 目录的旧孤儿软链。
+- 将 `multitool_config.cfg` 和 `calibration.cfg` 复制到 `~/printer_data/config/multitool/`，已存在的文件不会覆盖。
+- 在 `printer.cfg` 顶部注入 `[include multitool/*.cfg]`，注入前备份为 `printer.cfg.bak.multitool`。
+- 重启 Klipper 服务。
+
+安装完成后，主要修改这个文件：
+
+```text
+~/printer_data/config/multitool/multitool_config.cfg
+```
+
+## 3. 功能配置
+
+默认配置文件已经包含所有模块示例。建议先保留 `[multitool]` 和两个钩子宏，把不需要的可选 section 整段删除。
+
+### 3.1 核心配置
+
+`[multitool]` 是必需 section：
 
 ```cfg
-#####################################################################
-# 1. 插件 section（声明即启用）
-#####################################################################
 [multitool]
 tool_count: 4
 z_hop: 0.4
 feed_z: 600
 accel_swap: 8000
-untool_safe_z: 10        # 上次为"无热端"时第一动作要抬到的安全 Z
+untool_safe_z: 10
+```
 
-# 偏移管理（可选）
-[multitool_offsets]
-z_offset_adaptive: False
+字段说明：
 
-# 夹紧检测（可选）—— 不需要时整段删除
-[multitool_clamp]
-pin: ^!toolhead:TOOL_CLAMP
-settle_ms: 50
+| 字段 | 说明 |
+|---|---|
+| `tool_count` | 工具数量，必填。`4` 表示注册 `T0..T3` |
+| `z_hop` | 换头前相对抬 Z 的高度，单位 mm |
+| `feed_z` | Z 运动速度，单位 mm/min |
+| `accel_swap` | 换头期间临时使用的加速度 |
+| `untool_safe_z` | 当前为无热端时，抓取第一个热端前先移动到的安全 Z |
 
-# 换头计时统计（可选）
-[multitool_stats]
+主模块会自动维护：
 
+- `current_tool = -1` 表示当前无热端。
+- `SAVE_VARIABLE VARIABLE=current_tool ...` 用于重启后恢复状态。
+- `T0..T{n-1}`、`UNTOOL`、`CHANGE_TOOL T=<n>`、`QUERY_TOOL_STATUS` 命令。
 
-#####################################################################
-# 2. 用户钩子：放回热端  (默认实现 = 报错，必须替换)
-#####################################################################
+不要再额外定义 `[gcode_macro T0]`、`[gcode_macro UNTOOL]` 或 `[gcode_macro CHANGE_TOOL]`，否则启动时会报命令冲突。
+
+### 3.2 换头钩子配置
+
+必须实现两个宏：
+
+```cfg
 [gcode_macro multitool_release_tool]
 gcode:
     {% set tool = params.TOOL|int %}
-    {action_raise_error(
-        "[multitool] 钩子 multitool_release_tool 未实现！...")}
+    # 在这里写把 T{tool} 放回工具坞的机械动作
+    M400
 
-    # ====== 删除上方 action_raise_error 后填入你的动作 ======
-    # G90
-    # G0 X... Y... F...
-    # M400
-
-
-#####################################################################
-# 3. 用户钩子：抓取热端  (默认实现 = 报错，必须替换)
-#####################################################################
 [gcode_macro multitool_pickup_tool]
 gcode:
     {% set tool = params.TOOL|int %}
-    {action_raise_error(
-        "[multitool] 钩子 multitool_pickup_tool 未实现！...")}
-
-    # ====== 删除上方 action_raise_error 后填入你的动作 ======
-    # G90
-    # G0 X... Y... F...
-    # M400
+    # 在这里写从工具坞抓取 T{tool} 的机械动作
+    M400
 ```
 
-### 你需要做什么
+默认配置中的两个钩子会直接 `action_raise_error`，这是为了提醒你必须替换为真实动作。
 
-1. **修改 `[multitool]` 字段**：按你的机器调整 `tool_count` / `z_hop` / `accel_swap` 等。
-2. **替换两个钩子宏**：默认实现会直接 `action_raise_error` 报错——这是故意设计的，强制你在使用前完成钩子实现。
-   - `multitool_release_tool`：写"把 T{tool} 热端放回坞"的运动序列
-   - `multitool_pickup_tool`：写"从坞中抓起 T{tool} 热端"的运动序列
-3. 不需要的子模块（如 `[multitool_clamp]` / `[multitool_offsets]` / `[multitool_stats]`）整段删除即可。
+钩子里只写机械运动，例如移动到坞口、进入坞位、横移、退出、等待运动队列清空等。不要在钩子里手动处理这些事项：
 
-### 字段含义
+- 不要写 `current_tool` 或 `SAVE_VARIABLE VARIABLE=current_tool`。
+- 不要调用 `SET_GCODE_OFFSET` 处理工具偏移。
+- 不要手动处理换头统计。
+- 不要手动做夹紧状态落盘或状态切换。
+- 不要在钩子里嵌套调用 `Tn`、`CHANGE_TOOL`、`UNTOOL`。
 
-各 section 详细字段（默认值、可选项、状态对象、持久化字段）见
-[`multitool_config.cfg`](multitool_config.cfg) 内的注释，以及源码 [`klipper/extras/`](klipper/extras/) 各模块开头的 docstring。
+主流程已经负责：
 
-### 钩子里**不要**做的事
+- 换头前保存 G-code 状态。
+- 切换到 `accel_swap`。
+- 抬升 `z_hop`。
+- 调用释放和抓取钩子。
+- 根据可选模块做夹紧检查、耗材检查、统计和偏移应用。
+- 恢复 G-code 状态和原加速度。
 
-- ❌ 调 `_assert_clamp` / `_tc_clamp_*`（框架已自动前后置）
-- ❌ 调 `SET_GCODE_OFFSET`（框架统一处理偏移）
-- ❌ 调 `TOOLCHANGE_TIMER_*` / `TOOLCHANGE_STAGE_*`（框架自动调）
-- ❌ 写 `current_tool`（落盘是框架的职责）
+### 3.3 偏移管理配置
 
----
-
-## 验证安装
-
-### 1) 重启确认
-
-```
-FIRMWARE_RESTART
-QUERY_TOOL_STATUS
-```
-
-输出应包含：当前热端编号 / 持久化值 / 工具数量。
-
-### 2) 完整链路
-
-```
-T0
-T1
-UNTOOL
-T2
-QUERY_CLAMP_STATUS         # 启用了 [multitool_clamp] 时
-```
-
----
-
-## 命令一览
-
-| 来源 | 命令 | 说明 |
-|---|---|---|
-| `[multitool]` | `T0..T{n-1}` | 切换到对应热端 |
-| `[multitool]` | `UNTOOL` | 卸下当前热端 |
-| `[multitool]` | `CHANGE_TOOL T=<n>` | 兼容入口（`-1` 表示卸下） |
-| `[multitool]` | `QUERY_TOOL_STATUS` | 查询当前热端 / 持久化值 |
-| `[multitool_clamp]` | `QUERY_CLAMP_STATUS` | 查询夹紧开关状态 |
-| `[multitool_offsets]` | — | 完全自动，无对外命令 |
-| `[multitool_stats]` | — | 完全自动，无对外命令 |
-| `[multitool_filament]` | `QUERY_FILAMENT_STATUS` | 查询各通道耗材装载状态与续打组 |
-| `[multitool_filament]` | `CHECK_PRINT_FILAMENT TOOLS=<list>` | 打印前检查 `TOOLS` 指定通道是否都有耗材，缺料则报错中止打印 |
-| `calibration.cfg` | `CALIBRATE_TOOL TOOL=<n>` | 校准单个工具（T0 设基准，其余测相对偏移并落盘） |
-| `calibration.cfg` | `CALIBRATE_ALL_TOOLS` | 批量校准全部工具 |
-| `[tools_calibrate]` | `TOOL_LOCATE_SENSOR` | 定位对刀传感器中心（用 T0 调用） |
-| `[tools_calibrate]` | `TOOL_CALIBRATE_TOOL_OFFSET` | 测当前工具相对 T0 的偏移 |
-
----
-
-## 打印前耗材检查（CHECK_PRINT_FILAMENT）
-
-打印开始前，先确认本次任务用到的每个通道都装好了料：缺料就直接报错中止，
-避免打到一半才发现某通道没料。
-
-### 命令
-
-```
-CHECK_PRINT_FILAMENT TOOLS=0,1,2
-```
-
-- `TOOLS`：本次打印用到的通道列表，逗号分隔（允许尾随逗号 / 空白）。
-- 逐通道输出状态总览（`已装载 / 已卸载 / 未知`）。
-- 任一所需通道明确**无耗材** → 抛错，使调用它的 `PRINT_START` 宏中断，打印不会开始。
-- 通道状态**未知**（启动后从未上报电平，实际打印时几乎不出现）→ 仅警告、不阻塞。
-- `TOOLS` 为空 → 跳过检查（兼容单色 / 未传参）。
-
-### 与切片器 / PRINT_START 集成
-
-切片器（OrcaSlicer / PrusaSlicer 等）的 start gcode 把用到的通道拼成 `TOOLS`：
-
-```gcode
-PRINT_START ... TOOLS="{if is_extruder_used[0]}0,{endif}{if is_extruder_used[1]}1,{endif}{if is_extruder_used[2]}2,{endif}{if is_extruder_used[3]}3,{endif}"
-```
-
-在你自己的 `PRINT_START` 宏开头加一行（仅一行，不影响原有逻辑）：
+启用 `[multitool_offsets]` 后，插件会在换头完成后自动调用 `SET_GCODE_OFFSET`：
 
 ```cfg
-[gcode_macro PRINT_START]
-gcode:
-    {% set tools = params.TOOLS|default('') %}
-    CHECK_PRINT_FILAMENT TOOLS={tools}
-    # ... 其余原有逻辑 ...
+[multitool_offsets]
+z_offset_adaptive: False
+# save_prefix: t
 ```
 
----
+字段说明：
 
-## 断料续打（continuation_groups）
+| 字段 | 默认值 | 说明 |
+|---|---:|---|
+| `z_offset_adaptive` | `False` | 开启后，每次打印首次使用的热端作为 Z 基准，后续热端使用相对 Z 差值 |
+| `save_prefix` | `t` | 偏移变量前缀 |
 
-`[multitool_filament]` 在为每个热端注册耗材开关的同时，支持**断料续打**：
-打印中当前热端断料时，自动切到同组的下一个有料热端继续打印；同组没有可用
-热端时正常暂停。
+默认读取的保存变量名为：
 
-### 配置续打组
+```text
+t0_offset_x / t0_offset_y / t0_offset_z
+t1_offset_x / t1_offset_y / t1_offset_z
+...
+```
 
-在 `[multitool_filament]` 下加一行 `continuation_groups`，格式 `[a,b,...],[c],[d]`：
-每个方括号是一个**有序**续打组。
+如果 `save_prefix: tool_`，则变量名变为 `tool_0_offset_x` 这类格式。
+
+`z_offset_adaptive: True` 时，打印进入 `printing` 状态会重置基准热端，首次应用偏移的工具会成为本次打印的基准。基准热端会持久化到 `base_tool`。
+
+### 3.4 夹紧检测配置
+
+启用 `[multitool_clamp]` 后，插件会使用 Klipper `buttons` helper 读取一个夹紧开关：
+
+```cfg
+[multitool_clamp]
+pin: ^!toolhead:TOOL_CLAMP
+settle_ms: 50
+```
+
+字段说明：
+
+| 字段 | 说明 |
+|---|---|
+| `pin` | 夹紧开关输入引脚，使用 Klipper 的 `^`、`!`、`~` 修饰符调整电平 |
+| `settle_ms` | 每次校验前 `M400` 后额外等待的去抖时间 |
+
+模块约定：
+
+- `PRESSED = 已夹紧`
+- `RELEASED = 已释放`
+
+如果实际状态相反，请通过 `pin` 的 `!` 反相修饰符调整，不需要额外配置 `pressed_value`。
+
+启用后主流程会自动检查：
+
+- 入口校验：当前有热端时应为已夹紧，当前无热端时应为已释放。
+- 释放旧热端后应为已释放。
+- 抓取新热端后应为已夹紧。
+
+排查命令：
+
+```gcode
+QUERY_CLAMP_STATUS
+```
+
+### 3.5 换头统计配置
+
+启用 `[multitool_stats]` 后，换头统计完全自动运行：
+
+```cfg
+[multitool_stats]
+# persist_keys_prefix: tc_total_
+# boot_banner_delay_s: 5.0
+```
+
+字段说明：
+
+| 字段 | 默认值 | 说明 |
+|---|---:|---|
+| `persist_keys_prefix` | `tc_total_` | 历史累计统计保存变量前缀 |
+| `boot_banner_delay_s` | `5.0` | 启动后延迟输出历史累计提示的秒数，设为 `0` 可关闭 |
+
+统计模块没有手动 G-code 命令。它会自动：
+
+- 每次成功换头后累计次数、总耗时、释放阶段、抓取阶段、等温阶段耗时。
+- 进入 `printing` 时重置本次打印统计。
+- 打印结束、取消或错误时输出本次打印和历史累计统计。
+- 每次成功换头后保存历史累计到 `[save_variables]`。
+
+### 3.6 耗材检测与断料续打配置
+
+启用 `[multitool_filament]` 后，每个工具头需要一个耗材检测 pin。通道数量直接复用 `[multitool] tool_count`。
 
 ```cfg
 [multitool_filament]
+boot_grace_s: 5
 continuation_groups: [1,2],[0],[3]
+runout_continue_length: 50
+runout_continue_poll_s: 0.3
+runout_event_delay: 3
 pin_0: ^multihotend:IO0
 pin_1: ^multihotend:IO1
 pin_2: ^multihotend:IO2
 pin_3: ^multihotend:IO3
 ```
 
-含义（对应上面的 `[1,2],[0],[3]`）：
+字段说明：
 
-- T1 打印中断料 → 自动续打到 T2。
-- T2 打印中断料 → 环绕回查 T1（若已补料则续打，否则暂停）。
-- T0 自成一组，没有可切换对象 → 断料直接暂停打印。
-- T3 同理，自成一组 → 断料直接暂停打印。
-- 没列进任何组的热端 → 断料直接暂停打印。
-- 不配置 `continuation_groups` → 断料只在控制台打印提示，不自动续打/暂停（向后兼容）。
+| 字段 | 默认值 | 说明 |
+|---|---:|---|
+| `pin_0..pin_n` | 必填 | 每个工具头的耗材检测 pin |
+| `boot_grace_s` | `5` | 启动后等待 buttons 上报状态的时间 |
+| `continuation_groups` | 空 | 断料续打组，不配置则断料只提示 |
+| `runout_continue_length` | `0` | 断料后继续消耗多少 mm 净送料再触发续打 / 暂停 |
+| `runout_continue_poll_s` | `0.3` | 延后续打期间轮询挤出机位置的间隔 |
+| `runout_event_delay` | `3` | 断料事件去抖窗口 |
 
-> 同一个热端不能出现在多个组里（语义二义，启动会报错）。
-> 组内查找用 `skip` 语义：跳过同样没料的成员，全组都没料才暂停。
+模块约定：
 
-### 断料后延后续打（runout_continue_length）
+- `PRESSED = 耗材已装载`
+- `RELEASED = 耗材已卸载`
 
-断料传感器多装在料管入口，触发时传感器到喷嘴之间的料管里仍有一段可用耗材。
-默认行为是断料**立即**触发暂停/续打，这段残料会被浪费。配置
-`runout_continue_length`（mm）后，断料触发不立即处理，而是**让打印继续**，
-直到挤出机净送料达到该长度，再触发原有的暂停/续打流程，从而把料管里的残料用完。
+换头到某个工具前，主流程会自动检查对应通道是否有料。未启用 `[multitool_filament]` 时，换头不会做耗材检查。
+
+#### 打印前耗材检查
+
+可在 `PRINT_START` 开头调用：
 
 ```cfg
-[multitool_filament]
+[gcode_macro PRINT_START]
+gcode:
+    {% set tools = params.TOOLS|default('') %}
+    CHECK_PRINT_FILAMENT TOOLS={tools}
+    # 其余原有 PRINT_START 逻辑
+```
+
+切片器 start gcode 传入本次使用的工具列表，例如 OrcaSlicer / PrusaSlicer 可使用类似写法：
+
+```gcode
+PRINT_START TOOLS="{if is_extruder_used[0]}0,{endif}{if is_extruder_used[1]}1,{endif}{if is_extruder_used[2]}2,{endif}{if is_extruder_used[3]}3,{endif}"
+```
+
+命令行为：
+
+- `CHECK_PRINT_FILAMENT TOOLS=0,1,2` 会检查指定通道。
+- `TOOLS` 允许空白和尾随逗号。
+- 任一指定通道明确无耗材时，命令报错并中止 `PRINT_START`。
+- 通道状态未知时会警告，但按有耗材放行。
+
+#### 断料续打
+
+`continuation_groups` 的格式是 `[a,b,...],[c],[d]`，每个方括号是一组有序续打工具。
+
+示例：
+
+```cfg
 continuation_groups: [1,2],[0],[3]
-runout_continue_length: 50       # 断料后再消耗 50mm 耗材才触发续打/暂停 (0=立即)
-# runout_continue_poll_s: 0.3    # 延后期间轮询挤出机位置的间隔(秒)，默认 0.3
-pin_0: ^multihotend:IO0
 ```
 
-- **测量方式**：用挤出机轴（toolhead E）绝对坐标的增量，即**净送料量**（回抽会
-  自动抵消）。该值在打印过程中连续累积，不受切片器每层 `G92 E0` 影响。
-- 它是运动规划的**命令位置**（含前瞻缓冲），相对喷嘴实际出料略提前一点点，
-  无需非常精确的场景足够用。
-- 默认 `0` = 关闭，行为与旧版完全一致（立即触发）。
-- 仅在配置了 `continuation_groups` 时生效（与断料处理同一条路径）。
-- 延后期间若**手动暂停 / 补料 / 换头 / 打印结束**，会自动取消倒计时。
-- `runout_continue_length` 不要超过料管实际残余长度，否则会空打（喷嘴抽空）。
+含义：
 
-> 可用 `QUERY_FILAMENT_STATUS` 查看当前延后续打长度配置。
+- T1 打印中断料时，优先切到 T2。
+- T2 打印中断料时，环绕回查 T1。
+- T0 和 T3 各自成组，没有其他可续打工具，断料时正常暂停。
+- 没出现在任何组里的工具，断料时正常暂停。
+- 同一个工具不能出现在多个组里。
 
-### 续打编排与可选钩子
+断料触发后，框架会自动：
 
-触发续打时，框架自动按下面顺序编排（先暂停，再判断）：
-
-```
+```text
 PAUSE
-→ M104 T<新热端> S<旧热端温度>                  # 框架自动：复制旧热端温度到新热端
-→ [multitool_filament_before_swap FROM TO]   # 可选钩子
-→ CHANGE_TOOL T=<下一个热端>                   # 含等温（此时新热端已有目标温度）
-→ M104 T<旧热端> S0                            # 框架自动：换头后关闭旧热端
-→ [multitool_filament_after_swap FROM TO]    # 可选钩子
-→ RESUME
+M104 T<新热端> S<旧热端温度>
+multitool_filament_before_swap FROM=<旧> TO=<新>   # 可选
+CHANGE_TOOL T=<新>
+M104 T<旧热端> S0
+multitool_filament_after_swap FROM=<旧> TO=<新>    # 可选
+RESUME
 ```
 
-新热端的加热**无需手写钩子**：框架会自动把旧热端的目标温度复制到新热端，
-随后的 `CHANGE_TOOL` 会等温；换头完成后旧热端会被自动关闭（设为 0）。
+`multitool_filament_before_swap` 和 `multitool_filament_after_swap` 都是可选宏。前者适合写换头前的额外动作，后者适合写换头后的上料、排废、prime 动作。框架已自动复制温度、等温、关闭旧热端，并在 `RESUME` 后重新应用新热端偏移。
 
-每热端的 **gcode 偏移也无需手写钩子**：续打用 `PAUSE`/`RESUME` 包裹，而
-`RESUME` 的 `RESTORE_GCODE_STATE` 会把偏移还原成暂停时（旧热端）的值，框架
-已在 `RESUME` 之后自动重新应用新热端偏移加以抵消（需启用 `[multitool_offsets]`）。
+`runout_continue_length` 用于消耗传感器到喷嘴之间的残余耗材。设置为 `50` 表示断料信号出现后，继续打印到挤出机净送料增加 50 mm，再触发暂停或续打。中途如果手动暂停、补料、换头或打印结束，延后续打会自动取消。
 
-> 注意：`RESTORE_GCODE_STATE` **不会**恢复加速度/速度限制（`SET_VELOCITY_LIMIT`
-> 的 `max_accel` 等属于 toolhead 层，不在 gcode state 内）。为此框架已在续打结尾
-> 自动用 `SET_VELOCITY_LIMIT` 把加速度/速度限制写回断料前的值作为兜底，钩子内的
-> 临时改动不会残留到续打后的打印（仍建议钩子尽量不改）。
+排查命令：
 
-两个钩子宏都是**可选**的（未定义则跳过），入参 `FROM=<旧热端> TO=<新热端>`：
+```gcode
+QUERY_FILAMENT_STATUS
+```
 
-- `multitool_filament_before_swap`：换头**前**的额外动作（框架已自动设温/等温，无需再设温）。
-- `multitool_filament_after_swap`：换头**后**、`RESUME` 前。常用于新热端
-  上料 / 吹料 / 排废 / Prime，确保续打前出料正常。
+### 3.7 自动对刀校准配置
 
-> 默认配置 [multitool_config.cfg](multitool_config.cfg) 中给出了两个钩子的注释模板。
+`calibration.cfg` 会由安装脚本复制到：
 
----
+```text
+~/printer_data/config/multitool/calibration.cfg
+```
 
-## 自动对刀校准（tools_calibrate）
+它包含两部分：
 
-本项目内置了喷嘴接触式自动对刀能力，由两部分组成：
+- `[tools_calibrate]`：接触式对刀模块配置。
+- `CALIBRATE_TOOL` / `CALIBRATE_ALL_TOOLS`：本仓库提供的校准编排宏。
 
-- `klipper/extras/tools_calibrate.py`：**vendoring 自上游
-  [viesturz/klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger)**
-  （`klipper/extras/tools_calibrate.py`，GPLv3）。自包含，仅依赖 Klipper 标准对象，
-  **不需要**上游的 `toolchanger.py` / `tool.py` 等其它文件。
-- [calibration.cfg](calibration.cfg)：本仓库提供的校准编排宏（`CALIBRATE_TOOL` /
-  `CALIBRATE_ALL_TOOLS`），`install.sh` 会自动把它部署到
-  `~/printer_data/config/multitool/`，由 `[include multitool/*.cfg]` 自动加载。
+基础配置示例：
 
-### 工作流程
+```cfg
+[tools_calibrate]
+pin: ^PD11
+travel_speed: 15
+spread: 4.5
+lower_z: 0.6
+speed: 2
+lift_speed: 4
+final_lift_z: 1
+sample_retract_dist: 2
+samples_tolerance: 0.1
+samples: 5
+samples_result: median
 
-1. 编辑 `calibration.cfg`：替换 `[tools_calibrate] pin` 为你的对刀器引脚，并按机器
-   实测填写 `_TOOL_CALIB_VARS` 里的传感器中心坐标、安全坐标、`tool_count`。
-2. 执行 `CALIBRATE_ALL_TOOLS`（或逐个 `CALIBRATE_TOOL TOOL=<n>`）。
-3. T0 作为基准（偏移锁 0），其余工具测出相对 T0 的 XYZ 偏移。
+[gcode_macro _TOOL_CALIB_VARS]
+variable_sensor_x: 112.5
+variable_sensor_y: -4
+variable_safe_x: 112
+variable_safe_y: 10.0
+variable_safe_z: 10.0
+variable_tool_count: 4
+gcode:
+```
 
-### 与偏移系统的衔接
+必须按机器修改：
 
-校准结果通过 `SAVE_VARIABLE` 写入 `t{n}_offset_x/y/z`，这正是
-[`klipper/extras/multitool_offsets.py`](klipper/extras/multitool_offsets.py)
-读取偏移所用的字段（默认前缀 `t`）。因此**校准完成后无需手动搬运数据**，启用
-`[multitool_offsets]` 即可在换头时自动应用各热端偏移。
+- `[tools_calibrate] pin`：对刀器 / 喷嘴接触传感器引脚。
+- `variable_sensor_x` / `variable_sensor_y`：传感器中心坐标。
+- `variable_safe_x` / `variable_safe_y` / `variable_safe_z`：校准前后移动用安全坐标。
+- `variable_tool_count`：工具数量，应与 `[multitool] tool_count` 一致。
 
-> 不需要对刀校准时，删除 `multitool/calibration.cfg` 即可；`tools_calibrate.py`
-> 不被任何 cfg 引用时不会加载，无副作用。
+常用命令：
 
----
+```gcode
+CALIBRATE_TOOL TOOL=0
+CALIBRATE_TOOL TOOL=1
+CALIBRATE_ALL_TOOLS
+```
 
-## moonraker 自动更新（可选）
+校准逻辑：
 
-在 `moonraker.conf` 中添加：
+- T0 作为基准，保存 `t0_offset_x/y/z = 0`。
+- 其他工具通过接触式探测计算相对 T0 的 XYZ 偏移。
+- 结果写入 `t{n}_offset_x/y/z`，可被 `[multitool_offsets]` 自动读取。
+
+不需要自动对刀时，可以删除或不 include `calibration.cfg`；未声明 `[tools_calibrate]` 时，对刀模块不会加载。
+
+## 4. 常用命令
+
+| 命令 | 来源 | 说明 |
+|---|---|---|
+| `T0..T{n-1}` | `[multitool]` | 切换到对应工具 |
+| `UNTOOL` | `[multitool]` | 卸下当前工具 |
+| `CHANGE_TOOL T=<n>` | `[multitool]` | 切换工具，`T=-1` 表示卸下 |
+| `QUERY_TOOL_STATUS` | `[multitool]` | 查询当前工具、持久化值、基准工具 |
+| `QUERY_CLAMP_STATUS` | `[multitool_clamp]` | 查询夹紧开关状态 |
+| `QUERY_FILAMENT_STATUS` | `[multitool_filament]` | 查询各通道耗材和续打组 |
+| `CHECK_PRINT_FILAMENT TOOLS=0,1` | `[multitool_filament]` | 打印前检查指定通道耗材 |
+| `CALIBRATE_TOOL TOOL=<n>` | `calibration.cfg` | 校准单个工具 |
+| `CALIBRATE_ALL_TOOLS` | `calibration.cfg` | 依次校准全部工具 |
+| `TOOL_LOCATE_SENSOR` | `[tools_calibrate]` | 用 T0 定位对刀传感器 |
+| `TOOL_CALIBRATE_TOOL_OFFSET` | `[tools_calibrate]` | 测当前工具相对 T0 的偏移 |
+| `TOOL_CALIBRATE_QUERY_PROBE` | `[tools_calibrate]` | 查询对刀探针状态 |
+
+`[multitool_offsets]` 和 `[multitool_stats]` 没有手动命令，行为由换头流程和打印状态自动驱动。
+
+## 5. 安装验证
+
+安装并修改配置后，执行：
+
+```gcode
+FIRMWARE_RESTART
+QUERY_TOOL_STATUS
+```
+
+确认输出里包含当前热端、持久化值、基准热端和工具数量。
+
+然后按你的机器安全顺序测试：
+
+```gcode
+T0
+QUERY_TOOL_STATUS
+T1
+QUERY_TOOL_STATUS
+UNTOOL
+QUERY_TOOL_STATUS
+```
+
+启用了可选模块时，再分别测试：
+
+```gcode
+QUERY_CLAMP_STATUS
+QUERY_FILAMENT_STATUS
+CHECK_PRINT_FILAMENT TOOLS=0,1
+CALIBRATE_TOOL TOOL=0
+```
+
+首次测试建议降低运动速度、手放急停位置，并确认两个钩子宏的每一步机械动作都不会撞机。
+
+## 6. 故障排查
+
+| 现象 | 处理方式 |
+|---|---|
+| 启动报 `以下命令已被其他 section 注册` | 删除旧的 `[gcode_macro T0..Tn]`、`[gcode_macro UNTOOL]`、`[gcode_macro CHANGE_TOOL]` |
+| 启动报 `[multitool]` 缺少 `tool_count` | 在 `[multitool]` 中填写 `tool_count` |
+| 执行 `T0` 时报钩子未实现 | 替换默认 `multitool_release_tool` / `multitool_pickup_tool` 中的 `action_raise_error` |
+| 夹紧状态相反 | 调整 `[multitool_clamp] pin` 的 `!` 反相修饰符，目标是 `PRESSED = 已夹紧` |
+| 夹紧检测启动后状态未知 | buttons 只在电平变化时回调；检查接线和 pin 修饰符，必要时手动触发一次开关 |
+| 换头前提示目标工具无耗材 | 检查 `[multitool_filament] pin_n` 接线、电平修饰符和实际装料状态 |
+| `CHECK_PRINT_FILAMENT` 未检查任何通道 | 切片器没有传入 `TOOLS`，检查 start gcode 和 `PRINT_START` 参数转发 |
+| 偏移没有生效 | 确认启用了 `[multitool_offsets]`，并且 `[save_variables]` 中存在 `t{n}_offset_x/y/z` |
+| 重启后当前工具丢失 | 检查 `[save_variables]` 是否配置正确，变量文件是否可写 |
+| `M109 S200` 不自动作用于当前工具 | 这是预期行为。本插件不重写 `M109`，需要用户自行写宏 |
+
+## 7. 更新、迁移与许可证
+
+### Moonraker 更新管理
+
+可在 `moonraker.conf` 中加入：
 
 ```ini
 [update_manager klipper-toolchange-stats]
@@ -382,57 +532,38 @@ primary_branch: main
 install_script: install.sh
 ```
 
-之后即可在 Mainsail / Fluidd 的 Update Manager 一键升级。
+之后可以在 Mainsail / Fluidd 的更新管理中升级。升级后安装脚本会重新软链 extras，并保留已存在的用户配置文件。
 
----
+### 旧版迁移
 
-## 旧版用户迁移
+旧版如果使用过名称拼写错误的 `[multitoolr_stats]`，请改为：
 
-之前在用 `[multitool_stats]`（仅计时统计的旧版）的用户：
-
-1. 把 `printer.cfg` 中的 `[multitool_stats]` 改为 `[multitool_stats]`。
-2. 重新跑一次 `install.sh`（旧的 `multitool_stats.py` 已被新的 `multitool_stats.py` 取代）。
-3. 持久化字段 `tc_total_*` 保持不变，**历史累计数据自动延续**。
-4. 不再需要在 `change_tool` 中手动调 `TOOLCHANGE_TIMER_*` —— 主模块会自动嵌入计时。
-
----
-
-## 故障排查
-
-| 现象 | 解决方法 |
-|---|---|
-| 启动报 `[multitool] 以下命令已被其他 section 注册...` | 删除 `printer.cfg` 中残留的 `[gcode_macro T0..Tn]` / `[gcode_macro UNTOOL]` / `[gcode_macro CHANGE_TOOL]` |
-| 启动报 `section 'multitool' has no field 'tool_count'` | `tool_count` 必填 |
-| 切换报"夹紧检测未收到任何状态上报" | buttons helper 只在电平变化时回调；先手动按一下夹紧开关或 `QUERY_CLAMP_STATUS` 触发；检查 `[multitool_clamp] pin:` 是否正确 |
-| 切换报夹紧自检失败 | 检查 pin 的电平修饰符（用 `!` 反相）；不要同时声明 `[gcode_button tool_clamp]` 与 `[multitool_clamp]` 共用同一 pin |
-| `M109 S200` 不带 T 时不作用于当前热端 | 本插件**不重写** M109。如需此行为，自行写 `[gcode_macro M109] rename_existing: M99109`，根据 `printer.multitool.current_tool` 把 T 补全后调 `M99109` |
-| 重启后 `current_tool` 丢失 | 检查 `[save_variables]` 是否正确配置 |
-
----
-
-## 项目结构
-
+```cfg
+[multitool_stats]
 ```
+
+历史累计字段默认仍是 `tc_total_*`，启用 `[multitool_stats]` 后会自动延续。新版统计由主模块自动调用，不再需要在换头宏中手动调用旧的计时命令。
+
+如果从旧配置迁移到新版主模块，还需要删除旧的 `Tn`、`UNTOOL`、`CHANGE_TOOL` 宏，避免与 `[multitool]` 自动注册的命令冲突。
+
+### 项目结构
+
+```text
 klipper-toolchange-stats/
-├── install.sh                          # 软链 .py 到 ~/klipper/klippy/extras/
-│                                       # 并把默认配置部署到用户配置目录
-├── multitool_config.cfg               # 默认配置（含两个钩子的报错占位实现）
-├── calibration.cfg                    # 对刀校准编排宏（可选，自动部署）
+├── install.sh
+├── multitool_config.cfg
+├── calibration.cfg
 └── klipper/extras/
-    ├── multitool.py                  # 主模块（T*/UNTOOL/CHANGE_TOOL 编排）
-    ├── multitool_clamp.py            # 夹紧检测（可选）
-    ├── multitool_offsets.py          # 偏移 + Z 自适应（可选）
-    ├── multitool_filament.py         # 耗材检测 + 断料续打（可选）
-    ├── multitool_stats.py            # 换头计时统计（可选）
-    └── tools_calibrate.py            # 自动对刀校准（vendoring 自 viesturz/klipper-toolchanger, GPLv3）
+    ├── multitool.py
+    ├── multitool_offsets.py
+    ├── multitool_clamp.py
+    ├── multitool_stats.py
+    ├── multitool_filament.py
+    └── tools_calibrate.py
 ```
 
----
+### 许可证
 
-## License
+`klipper/extras/tools_calibrate.py` vendoring 自 `viesturz/klipper-toolchanger`，遵循其原始 GPLv3 许可证。
 
-仓库内未声明的源码遵循其原始上游许可证；本仓库新增内容默认 MIT。
-
-`klipper/extras/tools_calibrate.py` vendoring 自
-[viesturz/klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger)，
-遵循其原始 **GPLv3** 许可证，版权归原作者所有。
+本仓库新增内容默认 MIT。
