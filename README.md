@@ -2,8 +2,6 @@
 
 Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当前热端状态保存、偏移应用、夹紧检测、换头统计、耗材检测、断料续打和自动对刀校准；用户只需要在配置中实现两个机械动作钩子。
 
-> 本插件不重写 `M109`。如果你希望 `M109 S...` 在未指定 `T` 时自动作用于当前热端，请在自己的配置中单独实现 `M109` 宏。
-
 ## 目录
 
 - [1. 项目介绍](#1-项目介绍)
@@ -91,36 +89,7 @@ cd ~/klipper-toolchange-stats
 bash install.sh
 ```
 
-### 安装脚本会做什么
-
-`install.sh` 的默认路径如下：
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `KLIPPER_PATH` | `~/klipper` | Klipper 源码目录 |
-| `INSTALL_PATH` | `~/klipper-toolchange-stats` | 本插件仓库目录 |
-| `CONFIG_PATH` | `~/printer_data/config` | Klipper 配置目录 |
-| `REPO_URL` | GitHub 仓库地址 | 一键安装时使用的仓库地址 |
-| `FORCE` | `0` | extras 同名文件冲突时，设为 `1` 可强制备份并覆盖 |
-
-可以在命令前覆盖这些变量：
-
-```bash
-CONFIG_PATH=~/printer_data/config KLIPPER_PATH=~/klipper bash install.sh
-```
-
-脚本会自动执行：
-
-- 检查不要以 `root` 身份运行。
-- 检查 `klipper.service`、Klipper 源码目录和配置目录是否存在。
-- 如果 `INSTALL_PATH` 不存在，则克隆 `REPO_URL`。
-- 将 `klipper/extras/*.py` 软链到 `~/klipper/klippy/extras/`。
-- 清理指向本仓库 extras 目录的旧孤儿软链。
-- 将 `multitool_config.cfg` 和 `calibration.cfg` 复制到 `~/printer_data/config/multitool/`，已存在的文件不会覆盖。
-- 在 `printer.cfg` 顶部注入 `[include multitool/*.cfg]`，注入前备份为 `printer.cfg.bak.multitool`。
-- 重启 Klipper 服务。
-
-安装完成后，主要修改这个文件：
+### 安装完成后，主要修改这个文件：
 
 ```text
 ~/printer_data/config/multitool/multitool_config.cfg
