@@ -210,6 +210,9 @@ class Multitool:
             offsets = self.printer.lookup_object('multitool_offsets', None)
             if new_tool != -1 and offsets is not None:
                 offsets.apply(new_tool, base_tool=self.base_tool)
+            filament = self.printer.lookup_object('multitool_filament', None)
+            if filament is not None:
+                filament.on_tool_changed(new_tool)
             return
 
         if new_tool == -1:
@@ -279,6 +282,8 @@ class Multitool:
             if new_tool != -1:
                 if stats is not None:
                     stats.stage_begin('pickup')
+                if filament is not None:
+                    filament.on_tool_changed(new_tool)
                 self._invoke_hook('multitool_pickup_tool', new_tool)
                 if stats is not None:
                     stats.stage_end('pickup')
@@ -310,6 +315,8 @@ class Multitool:
                     stats.tc_commit()
                 else:
                     stats.tc_abort()
+            if not succeeded and filament is not None:
+                filament.on_tool_changed(self.current_tool)
             self.active = False
 
         # ---- 偏移应用 (在异常路径下不需要) ----
@@ -324,6 +331,9 @@ class Multitool:
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
             % (PERSIST_CURRENT_TOOL, tool))
+        filament = self.printer.lookup_object('multitool_filament', None)
+        if filament is not None:
+            filament.on_tool_changed(tool)
 
     # ------------------------------------------------------------------
     # 内部：调用用户钩子
