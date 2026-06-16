@@ -1,5 +1,5 @@
 #!/bin/bash
-# Klipper multitool-stats 安装脚本
+# Klipper multitool-stats 安装/更新脚本
 # 用法 (远程):
 #   wget -O - https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install.sh | bash
 # 用法 (本地):
@@ -41,7 +41,7 @@ function preflight_checks {
     fi
 }
 
-function check_download {
+function sync_repo {
     local installdirname installbasename
     installdirname="$(dirname "${INSTALL_PATH}")"
     installbasename="$(basename "${INSTALL_PATH}")"
@@ -54,9 +54,44 @@ function check_download {
             echo "[ERROR] 克隆 git 仓库失败！"
             exit 1
         fi
-    else
-        printf "[DOWNLOAD] 本地已存在仓库，跳过克隆。\n\n"
+        return
     fi
+
+    if [ ! -d "${INSTALL_PATH}/.git" ]; then
+        echo "[ERROR] ${INSTALL_PATH} 已存在，但不是 Git 仓库，无法自动更新。"
+        echo "        请手动检查该目录，或更换 INSTALL_PATH 后重新运行。"
+        exit 1
+    fi
+
+    local current_branch status_output
+    current_branch="$(git -C "${INSTALL_PATH}" branch --show-current)"
+    if [ -z "${current_branch}" ]; then
+        echo "[ERROR] ${INSTALL_PATH} 当前处于 detached HEAD，无法安全自动更新。"
+        echo "        请切回普通分支后重新运行，例如：git -C ${INSTALL_PATH} switch main"
+        exit 1
+    fi
+
+    status_output="$(git -C "${INSTALL_PATH}" status --porcelain)"
+    if [ -n "${status_output}" ]; then
+        echo "[ERROR] ${INSTALL_PATH} 存在未提交修改，已中止自动更新。"
+        echo "        请先提交、stash 或清理本地改动后重新运行。"
+        exit 1
+    fi
+
+    echo "[UPDATE] 本地已存在仓库，正在更新当前分支 ${current_branch}..."
+    if ! git -C "${INSTALL_PATH}" fetch origin "${current_branch}:refs/remotes/origin/${current_branch}"; then
+        echo "[ERROR] 拉取远端分支 origin/${current_branch} 失败。"
+        exit 1
+    fi
+
+    if ! git -C "${INSTALL_PATH}" merge --ff-only "origin/${current_branch}"; then
+        echo "[ERROR] 当前分支 ${current_branch} 无法 fast-forward 到 origin/${current_branch}。"
+        echo "        本地分支可能已与远端分叉，请手动 merge/rebase 后重新运行。"
+        exit 1
+    fi
+
+    chmod +x "${INSTALL_PATH}/install.sh"
+    printf "[UPDATE] 更新完成！\n\n"
 }
 
 function link_extension {
@@ -66,25 +101,16 @@ function link_extension {
         base="$(basename "${file}")"
         target="${KLIPPER_PATH}/klippy/extras/${base}"
 
-        # 冲突检测：如果目标已存在且不是本仓库的软链，则拒绝静默覆盖。
-        # 避免覆盖用户自有的同名插件 / Klipper fork 的同名文件。
+        # 如果目标已存在且不是本仓库的软链，直接覆盖为本仓库链接。
         if [ -e "${target}" ] || [ -L "${target}" ]; then
             local resolved
             resolved="$(readlink "${target}" 2>/dev/null || true)"
             if [ "${resolved}" != "${file}" ]; then
-                if [ "${FORCE:-0}" = "1" ]; then
-                    echo "  -> [WARN] ${base} 已存在 (${resolved:-非软链})，FORCE=1 已强制覆盖（备份为 ${base}.bak.multitool）"
-                    cp -P "${target}" "${target}.bak.multitool"
-                else
-                    echo "[ERROR] ${target} 已存在且不是本仓库的软链 (resolved='${resolved:-非软链}')。"
-                    echo "        为避免覆盖你自定义的同名插件，已中止安装。"
-                    echo "        如确认要覆盖，请重新执行：FORCE=1 ./install.sh"
-                    exit 1
-                fi
+                echo "  -> [WARN] ${base} 已存在 (${resolved:-非软链})，将覆盖为本仓库链接"
             fi
         fi
 
-        ln -sfn "${file}" "${target}"
+        ln -sfnT "${file}" "${target}"
         echo "  -> ${base}"
     done
 }
@@ -162,11 +188,11 @@ function restart_klipper {
 }
 
 printf "\n=========================================\n"
-echo "- Klipper multitool-stats 安装脚本 -"
+echo "- Klipper multitool-stats 安装/更新脚本 -"
 printf "=========================================\n\n"
 
 preflight_checks
-check_download
+sync_repo
 link_extension
 clean_orphan_links
 copy_config
@@ -185,14 +211,8 @@ printer.cfg 顶部已自动加入：
     ${INCLUDE_LINE}
 
 下一步：
-    1. 编辑 ${CONFIG_PATH}/${CONFIG_SUBDIR}/multitool_config.cfg
-    2. 修改 [multitool] 字段（tool_count / z_hop / 等）
-    3. 替换两个钩子宏（multitool_release_tool / multitool_pickup_tool）
-       的实现 —— 默认实现会直接报错以提示你必须替换
-    4. (可选) 编辑 calibration.cfg：替换 [tools_calibrate] pin 与
-       _TOOL_CALIB_VARS 里的传感器/安全坐标，不用对刀校准可整段删除
-    5. 重启 Klipper：FIRMWARE_RESTART
-    6. 验证：QUERY_TOOL_STATUS
+    请查看 README 完成配置：
+    https://github.com/null01024/klipper-toolchange-stats#readme
 
 可选: 在 moonraker.conf 中添加 update_manager 以支持 OTA 更新：
 
