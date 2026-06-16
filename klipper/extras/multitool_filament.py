@@ -46,6 +46,7 @@
 #   boot_grace_s: 5
 #   continuation_groups: [1,2],[0],[3]
 #   runout_continue_length: 50      # 断料后再消耗 50mm 耗材才触发续打 (0=立即)
+#   sync_active_spool: True         # 换头时同步 Spoolman 当前料盘
 #   pin_0: ^multihotend:IO0
 #   pin_1: ^multihotend:IO1
 #   pin_2: ^multihotend:IO2
@@ -74,6 +75,8 @@ class MultitoolFilament:
             'boot_grace_s', 5., minval=0.)
         self.runout_event_delay = config.getfloat(
             'runout_event_delay', RUNOUT_EVENT_DELAY, minval=0.)
+        self.sync_active_spool = config.getboolean('sync_active_spool', True)
+        self._spoolman_sync_warned = False
 
         # ---- 断料后延后续打 ----
         # runout_continue_length: 断料触发后，先让打印继续，直到挤出机净送料
@@ -183,6 +186,10 @@ class MultitoolFilament:
         reactor.register_callback(
             self._seed_and_report,
             reactor.monotonic() + self.boot_grace_s)
+        if self.sync_active_spool:
+            reactor.register_callback(
+                self._sync_active_spool_event,
+                reactor.monotonic() + self.boot_grace_s)
 
     def _load_spool_ids(self):
         sv = self.printer.lookup_object('save_variables', None)
@@ -202,6 +209,38 @@ class MultitoolFilament:
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
             % (SPOOL_ID_VAR_TMPL % tool, self._spool_ids[tool]))
+
+    def _sync_active_spool_event(self, _eventtime):
+        self.on_tool_changed(self.multitool.current_tool)
+
+    def on_tool_changed(self, tool):
+        if not self.sync_active_spool:
+            return
+        spool_id = None
+        if 0 <= tool < self.tool_count:
+            mapped_id = self._spool_ids[tool]
+            if mapped_id > 0:
+                spool_id = mapped_id
+        self._set_spoolman_active_spool(spool_id)
+
+    def _set_spoolman_active_spool(self, spool_id):
+        webhooks = self.printer.lookup_object('webhooks', None)
+        if webhooks is None:
+            if not self._spoolman_sync_warned:
+                self._spoolman_sync_warned = True
+                self.gcode.respond_info(
+                    "[耗材检查] 无法同步 Spoolman 当前料盘：webhooks 不可用。")
+            return
+        try:
+            webhooks.call_remote_method(
+                'spoolman_set_active_spool', spool_id=spool_id)
+        except Exception:
+            logging.exception(
+                "multitool_filament: failed to set active Spoolman spool")
+            if not self._spoolman_sync_warned:
+                self._spoolman_sync_warned = True
+                self.gcode.respond_info(
+                    "[耗材检查] 无法同步 Spoolman 当前料盘；请确认 Moonraker 已启用 [spoolman]。")
 
     def _seed_and_report(self, _eventtime):
         for ch in range(self.tool_count):
@@ -541,6 +580,8 @@ class MultitoolFilament:
                 % (tool, spool_id))
         else:
             gcmd.respond_info("[耗材检查] 通道%d 已清除 Spoolman 料盘关联" % tool)
+        if tool == self.multitool.current_tool:
+            self.on_tool_changed(tool)
 
     # ------------------------------------------------------------------
     # 公共方法：被 multitool 主流程在换头前调用
@@ -575,6 +616,7 @@ class MultitoolFilament:
             'runout_enabled': self.runout_enabled,
             'continuation_groups': [list(g) for g in self.groups],
             'runout_continue_length': self.runout_continue_length,
+            'sync_active_spool': self.sync_active_spool,
         }
 
 

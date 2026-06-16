@@ -265,6 +265,7 @@ continuation_groups: [1,2],[0],[3]
 runout_continue_length: 50
 runout_continue_poll_s: 0.3
 runout_event_delay: 3
+sync_active_spool: True
 pin_0: ^multihotend:IO0
 pin_1: ^multihotend:IO1
 pin_2: ^multihotend:IO2
@@ -281,6 +282,7 @@ pin_3: ^multihotend:IO3
 | `runout_continue_length` | `0` | 断料后继续消耗多少 mm 净送料再触发续打 / 暂停 |
 | `runout_continue_poll_s` | `0.3` | 延后续打期间轮询挤出机位置的间隔 |
 | `runout_event_delay` | `3` | 断料事件去抖窗口 |
+| `sync_active_spool` | `True` | 换头后自动把 Spoolman 当前料盘切到该通道绑定的料盘；通道未绑定时清空当前料盘 |
 
 模块约定：
 
@@ -299,6 +301,8 @@ SET_TOOL_SPOOL_ID TOOL=0 SPOOL_ID=0   # 清除关联
 ```
 
 映射会持久化到 `[save_variables]`，变量名为 `tool_0_spool_id`、`tool_1_spool_id` 等；`0` 表示未分配料盘。`QUERY_FILAMENT_STATUS` 会同时输出每个通道的耗材状态和 Spoolman ID。
+
+`sync_active_spool` 默认为开启。启用后，`T0..Tn`、`CHANGE_TOOL`、`UNTOOL` 或断料续打引发的当前工具变化都会通过 Moonraker 的 `spoolman_set_active_spool` 远程方法同步 Spoolman 当前料盘：切到已绑定通道时设置对应 spool id，卸下工具或切到未绑定通道时清空当前料盘，避免耗材用量继续记到上一卷料。该功能需要 Moonraker 启用 `[spoolman]`。
 
 #### 打印前耗材检查
 
