@@ -167,13 +167,26 @@ class MultitoolStats:
     # ------------------------------------------------------------------
     # 暴露给 G-code 模板的状态
     # ------------------------------------------------------------------
-    def get_status(self, _eventtime):
+    def _current_status(self, eventtime):
+        current = {
+            'active': self._current['active'],
+            'elapsed': self._current['elapsed'],
+            'stages': self._current['stages'].copy(),
+        }
+        if not self._current['active']:
+            return current
+
+        now = eventtime or monotonic()
+        current['elapsed'] = max(0., now - self._current['start'])
+        for stage in TOOLCHANGE_STAGES:
+            stage_start = self._current['stage_start'][stage]
+            if stage_start > 0.:
+                current['stages'][stage] = max(0., now - stage_start)
+        return current
+
+    def get_status(self, eventtime):
         return {
-            'tc_current': {
-                'active': self._current['active'],
-                'elapsed': self._current['elapsed'],
-                'stages': self._current['stages'].copy(),
-            },
+            'tc_current': self._current_status(eventtime),
             'tc_print': {
                 'count': self._print['count'],
                 'elapsed': self._print['elapsed'],
