@@ -172,6 +172,7 @@ class MultitoolStats:
             'active': self._current['active'],
             'elapsed': self._current['elapsed'],
             'stages': self._current['stages'].copy(),
+            'active_stage': None,
         }
         if not self._current['active']:
             return current
@@ -182,6 +183,7 @@ class MultitoolStats:
             stage_start = self._current['stage_start'][stage]
             if stage_start > 0.:
                 current['stages'][stage] = max(0., now - stage_start)
+                current['active_stage'] = stage
         return current
 
     def get_status(self, eventtime):

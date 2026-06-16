@@ -48,6 +48,8 @@ class Multitool:
         self.current_tool = -1   # -1 表示无热端
         self.base_tool = -1      # Z 偏移自适应基准；由 offsets 模块维护
         self.active = False      # 是否正在切换中
+        self.change_from_tool = -1
+        self.change_to_tool = -1
 
         # print_stats.state 单点轮询：子模块通过
         # register_print_state_listener 注册回调，避免各自重复轮询。
@@ -232,6 +234,8 @@ class Multitool:
         # accel 切换状态：是否已经做了 SET_VELOCITY_LIMIT/SAVE_GCODE_STATE，
         # 入口校验失败时不需要恢复
         prepared = False
+        self.change_from_tool = old_tool
+        self.change_to_tool = new_tool
         self.active = True
         succeeded = False
         try:
@@ -318,6 +322,8 @@ class Multitool:
             if not succeeded and filament is not None:
                 filament.on_tool_changed(self.current_tool)
             self.active = False
+            self.change_from_tool = -1
+            self.change_to_tool = -1
 
         # ---- 偏移应用 (在异常路径下不需要) ----
         if new_tool != -1 and offsets is not None:
@@ -387,6 +393,8 @@ class Multitool:
             'base_tool': self.base_tool,
             'tool_count': self.tool_count,
             'active': self.active,
+            'change_from_tool': self.change_from_tool,
+            'change_to_tool': self.change_to_tool,
             'tools': ['T%d' % i for i in range(self.tool_count)],
         }
 
