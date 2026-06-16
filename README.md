@@ -87,6 +87,16 @@ cd ~/klipper-toolchange-stats
 bash install.sh
 ```
 
+### 手动更新
+
+再次运行安装脚本会自动更新已有插件目录：脚本会在当前 Git 分支上执行 fast-forward 更新，然后重新软链 Klipper extras，并保留已存在的用户配置文件。
+
+```bash
+bash ~/klipper-toolchange-stats/install.sh
+```
+
+如果插件目录存在未提交修改，或当前分支已经和远端分叉，脚本会中止并提示先手动提交、stash、清理或 merge/rebase。
+
 ### 安装完成后，主要修改这个文件：
 
 ```text
@@ -515,7 +525,7 @@ primary_branch: main
 install_script: install.sh
 ```
 
-之后可以在 Mainsail / Fluidd 的更新管理中升级。升级后安装脚本会重新软链 extras，并保留已存在的用户配置文件。
+之后可以在 Mainsail / Fluidd 的更新管理中升级。安装脚本再次执行时也会尝试 fast-forward 更新当前分支；更新后会重新软链 extras，并保留已存在的用户配置文件。
 
 ### 旧版迁移
 
