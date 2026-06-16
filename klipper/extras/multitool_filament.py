@@ -608,6 +608,29 @@ class MultitoolFilament:
             self.gcode.respond_info(msg)
             raise self.printer.command_error(msg)
 
+    def _runout_status(self):
+        tool = self._continue_tool
+        if tool < 0 and self._handling_runout:
+            tool = self.multitool.current_tool
+
+        remaining = 0.
+        if (self._handling_runout and self._continue_timer is not None
+                and self.runout_continue_length > 0.):
+            try:
+                consumed = self._extruder_axis_pos() - self._continue_baseline
+                remaining = max(0., self.runout_continue_length - consumed)
+            except Exception:
+                logging.exception(
+                    "multitool_filament: failed to compute runout status")
+                remaining = 0.
+
+        return {
+            'active': self._handling_runout,
+            'tool': tool if self._handling_runout else -1,
+            'remaining_mm': remaining,
+            'continue_length': self.runout_continue_length,
+        }
+
     def get_status(self, eventtime):
         return {
             'tool_count': self.tool_count,
@@ -616,6 +639,7 @@ class MultitoolFilament:
             'runout_enabled': self.runout_enabled,
             'continuation_groups': [list(g) for g in self.groups],
             'runout_continue_length': self.runout_continue_length,
+            'runout': self._runout_status(),
             'sync_active_spool': self.sync_active_spool,
         }
 
