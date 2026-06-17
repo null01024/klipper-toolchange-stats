@@ -60,7 +60,7 @@ Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当
 
 未配置某个可选 section 时，对应功能不会加载，也不会参与换头流程。
 
-## 2. 安装方法
+## 2. 安装方法（单独本插件）
 
 ### 前置条件
 
@@ -101,6 +101,20 @@ bash ~/klipper-toolchange-stats/install.sh
 
 ```text
 ~/printer_data/config/multitool/multitool_config.cfg
+```
+
+## 一键安装 本插件及配套mainsail前端
+
+### 普通安装
+
+```bash
+wget -qO- https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install_toolchanger_stack.sh | bash
+```
+
+### 代理安装
+
+```bash
+GH_PROXY=https://v6.gh-proxy.org/ wget -qO- https://v6.gh-proxy.org/https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install_toolchanger_stack.sh | GH_PROXY=https://v6.gh-proxy.org/ bash
 ```
 
 ## 3. 功能配置
