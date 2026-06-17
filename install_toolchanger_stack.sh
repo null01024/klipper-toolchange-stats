@@ -194,7 +194,7 @@ function check_existing_mainsail {
     echo
 
     if [ ! -d "${MAINSAIL_PATH}" ] || [ ! -f "${MAINSAIL_PATH}/index.html" ]; then
-        die "未检测到原版 Mainsail 前端: ${MAINSAIL_PATH}。请先通过 KIAUH 安装原版 Mainsail 前端后，再重新运行本脚本。KIAUH: https://github.com/dw-0/kiauh"
+        die "未检测到原版 Mainsail 前端: ${MAINSAIL_PATH}。请先通过 KIAUH 安装原版 Mainsail 前端后，再重新运行本脚本。原版安装教程: https://docs.mainsail.xyz/setup/kiauh/"
     fi
 
     echo "[OK] 已检测到 Mainsail 前端: ${MAINSAIL_PATH}"
