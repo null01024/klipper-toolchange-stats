@@ -121,7 +121,7 @@ function unique_backup_path {
 }
 
 function current_script_dir {
-    local source="${BASH_SOURCE[0]:-}"
+    local source="${BASH_SOURCE:-}"
     if [ -n "${source}" ] && [ -f "${source}" ]; then
         cd "$(dirname "${source}")" && pwd
     else
