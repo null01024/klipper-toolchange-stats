@@ -24,6 +24,9 @@ MAINSAIL_TOOLCHANGER_ASSET="${MAINSAIL_TOOLCHANGER_ASSET:-mainsail.zip}"
 GH_PROXY="${GH_PROXY:-}"
 
 TMP_DIRS=""
+RED="\033[0;31m"
+YELLOW="\033[0;33m"
+RESET="\033[0m"
 
 function cleanup {
     local dir
@@ -35,14 +38,31 @@ trap cleanup EXIT
 
 function make_tmp_dir {
     local dir
-    dir="$(mktemp -d)"
+    if ! dir="$(mktemp -d)"; then
+        die "创建临时目录失败。"
+    fi
     TMP_DIRS="${TMP_DIRS} ${dir}"
     printf "%s\n" "${dir}"
 }
 
 function die {
-    echo "[ERROR] $*" >&2
+    printf "${RED}[ERROR] %s${RESET}\n" "$*" >&2
     exit 1
+}
+
+function warn {
+    printf "${YELLOW}[WARN] %s${RESET}\n" "$*" >&2
+}
+
+function require_command {
+    local cmd="${1}"
+    local hint="${2:-}"
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+        if [ -n "${hint}" ]; then
+            die "未找到命令 ${cmd}。${hint}"
+        fi
+        die "未找到命令 ${cmd}，请先安装后重新运行。"
+    fi
 }
 
 function preflight_checks {
@@ -50,9 +70,15 @@ function preflight_checks {
         die "不要以 root 身份运行此脚本。请直接用普通用户执行，脚本需要时会调用 sudo。"
     fi
 
-    if ! command -v unzip >/dev/null 2>&1; then
-        die "未找到 unzip，请先安装 unzip 后重新运行。"
-    fi
+    require_command bash
+    require_command sudo "请先安装 sudo，或使用具备 sudo 权限的普通用户。"
+    require_command unzip "请先安装 unzip 后重新运行。"
+    require_command dirname
+    require_command mktemp
+    require_command cp
+    require_command mv
+    require_command awk
+    require_command cmp
 
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
         die "未找到 curl 或 wget，至少需要其中一个用于下载前端 release。"
@@ -92,10 +118,11 @@ function download_url {
     fi
 
     if command -v curl >/dev/null 2>&1; then
-        curl -LfsS "${proxied}" -o "${dest}"
+        curl -LfsS "${proxied}" -o "${dest}" || die "下载失败: ${url}"
     else
-        wget -qO "${dest}" "${proxied}"
+        wget -qO "${dest}" "${proxied}" || die "下载失败: ${url}"
     fi
+    [ -s "${dest}" ] || die "下载文件为空: ${url}"
 }
 
 function pretty_home_path {
@@ -123,7 +150,7 @@ function unique_backup_path {
 function current_script_dir {
     local source="${BASH_SOURCE:-}"
     if [ -n "${source}" ] && [ -f "${source}" ]; then
-        cd "$(dirname "${source}")" && pwd
+        cd "$(dirname "${source}")" && pwd || die "读取当前脚本目录失败。"
     else
         printf "\n"
     fi
@@ -148,7 +175,7 @@ function run_plugin_installer {
     fi
 
     if [ -n "${installer}" ]; then
-        bash "${installer}"
+        bash "${installer}" || die "执行插件安装脚本失败: ${installer}"
         return
     fi
 
@@ -156,7 +183,7 @@ function run_plugin_installer {
     installer="${tmp}/install.sh"
     installer_url="${KLIPPER_STATS_REPO_RAW%/}/install.sh"
     download_url "${installer_url}" "${installer}"
-    bash "${installer}"
+    bash "${installer}" || die "执行下载的插件安装脚本失败: ${installer_url}"
 }
 
 function find_release_root {
@@ -200,23 +227,23 @@ function install_or_update_mainsail_toolchanger {
     staged="${tmp}/staged"
     release_url="https://github.com/${MAINSAIL_TOOLCHANGER_REPO}/releases/latest/download/${MAINSAIL_TOOLCHANGER_ASSET}"
 
-    mkdir -p "${extract}" "${staged}"
+    mkdir -p "${extract}" "${staged}" || die "创建前端临时目录失败: ${tmp}"
     download_url "${release_url}" "${zip}"
 
     echo "[INSTALL] 解压 release 包..."
-    unzip -q "${zip}" -d "${extract}"
+    unzip -q "${zip}" -d "${extract}" || die "解压 release 包失败: ${zip}"
 
     if ! release_root="$(find_release_root "${extract}")"; then
-        die "release 包中未找到 index.html，已中止前端更新。"
+        die "release 包中未找到 index.html，已中止前端更新。请检查 ${MAINSAIL_TOOLCHANGER_REPO} 的 ${MAINSAIL_TOOLCHANGER_ASSET} 内容。"
     fi
 
-    cp -a "${release_root}/." "${staged}/"
+    cp -a "${release_root}/." "${staged}/" || die "复制前端文件到临时目录失败: ${release_root} -> ${staged}"
 
     old_config=""
     if [ -f "${MAINSAIL_PATH}/config.json" ]; then
         old_config="${tmp}/config.json"
-        cp "${MAINSAIL_PATH}/config.json" "${old_config}"
-        cp "${old_config}" "${staged}/config.json"
+        cp "${MAINSAIL_PATH}/config.json" "${old_config}" || die "备份现有 config.json 失败: ${MAINSAIL_PATH}/config.json"
+        cp "${old_config}" "${staged}/config.json" || die "保留 config.json 到新前端目录失败。"
         echo "[CONFIG] 已保留现有 config.json"
     fi
 
@@ -224,21 +251,22 @@ function install_or_update_mainsail_toolchanger {
 
     backup=""
     target_parent="$(dirname "${MAINSAIL_PATH}")"
-    mkdir -p "${target_parent}"
+    mkdir -p "${target_parent}" || die "无法创建前端父目录: ${target_parent}"
+    [ -w "${target_parent}" ] || die "当前用户无权写入前端父目录: ${target_parent}"
 
     if [ -e "${MAINSAIL_PATH}" ] || [ -L "${MAINSAIL_PATH}" ]; then
         backup="$(unique_backup_path "${MAINSAIL_PATH}")"
         echo "[BACKUP] 备份现有前端目录到 ${backup}"
-        mv "${MAINSAIL_PATH}" "${backup}"
+        mv "${MAINSAIL_PATH}" "${backup}" || die "备份现有前端目录失败: ${MAINSAIL_PATH} -> ${backup}"
     fi
 
     echo "[INSTALL] 部署前端到 ${MAINSAIL_PATH}"
     if ! mv "${staged}" "${MAINSAIL_PATH}"; then
         if [ -n "${backup}" ] && [ -e "${backup}" ]; then
             echo "[ROLLBACK] 部署失败，恢复 ${MAINSAIL_PATH}"
-            mv "${backup}" "${MAINSAIL_PATH}"
+            mv "${backup}" "${MAINSAIL_PATH}" || die "部署失败，且回滚也失败。请手动恢复备份: ${backup}"
         fi
-        die "部署 mainsail-toolchanger 失败。"
+        die "部署 mainsail-toolchanger 失败: ${MAINSAIL_PATH}"
     fi
 
     echo "[DONE] mainsail-toolchanger 已更新。"
@@ -314,36 +342,60 @@ function patch_moonraker_conf {
     echo "========================================="
     echo
 
+    if [ -n "${MOONRAKER_CONF:-}" ] && [ ! -f "${MOONRAKER_CONF}" ]; then
+        die "指定的 MOONRAKER_CONF 不存在: ${MOONRAKER_CONF}"
+    fi
+
     conf="$(discover_moonraker_conf || true)"
     if [ -z "${conf}" ]; then
         echo "[MOONRAKER] 未找到 moonraker.conf，跳过自动配置。"
         echo "            如需指定路径，请使用 MOONRAKER_CONF=/path/to/moonraker.conf。"
         return
     fi
+    [ -r "${conf}" ] || die "当前用户无权读取 moonraker.conf: ${conf}"
+    [ -w "${conf}" ] || die "当前用户无权写入 moonraker.conf: ${conf}"
 
     tmp="$(make_tmp_dir)"
     tmp1="${tmp}/moonraker.conf.1"
     tmp2="${tmp}/moonraker.conf.2"
 
-    cp "${conf}" "${tmp1}"
-    remove_update_manager_section "[update_manager mainsail]" "${tmp1}" "${tmp2}"
-    cp "${tmp2}" "${tmp1}"
-    remove_update_manager_section "[update_manager klipper-toolchange-stats]" "${tmp1}" "${tmp2}"
-    cp "${tmp2}" "${tmp1}"
-    remove_update_manager_section "[update_manager mainsail-toolchanger]" "${tmp1}" "${tmp2}"
+    cp "${conf}" "${tmp1}" || die "复制 moonraker.conf 到临时文件失败: ${conf}"
+    remove_update_manager_section "[update_manager mainsail]" "${tmp1}" "${tmp2}" || die "处理 Moonraker 配置段失败: [update_manager mainsail]"
+    if ! cp "${tmp2}" "${tmp1}"; then
+        warn "更新 Moonraker 临时配置失败，已跳过 update_manager 自动配置。"
+        return
+    fi
+    remove_update_manager_section "[update_manager klipper-toolchange-stats]" "${tmp1}" "${tmp2}" || die "处理 Moonraker 配置段失败: [update_manager klipper-toolchange-stats]"
+    if ! cp "${tmp2}" "${tmp1}"; then
+        warn "更新 Moonraker 临时配置失败，已跳过 update_manager 自动配置。"
+        return
+    fi
+    if ! remove_update_manager_section "[update_manager mainsail-toolchanger]" "${tmp1}" "${tmp2}"; then
+        warn "删除旧 mainsail-toolchanger update_manager 段失败，已跳过 update_manager 自动配置。"
+        return
+    fi
 
-    append_update_manager_sections "${tmp2}"
+    if ! append_update_manager_sections "${tmp2}"; then
+        warn "追加新的 update_manager 配置失败，已跳过 Moonraker 自动配置。"
+        return
+    fi
 
     if cmp -s "${conf}" "${tmp2}"; then
         echo "[MOONRAKER] update_manager 配置已是目标状态，跳过修改。"
-        rm -f "${tmp1}" "${tmp2}"
+        rm -f "${tmp1}" "${tmp2}" || warn "清理 Moonraker 临时文件失败: ${tmp}"
         return
     fi
 
     backup="${conf}.bak.toolchanger.$(date +%Y%m%d-%H%M%S)"
-    cp "${conf}" "${backup}"
-    cp "${tmp2}" "${conf}"
-    rm -f "${tmp1}" "${tmp2}"
+    if ! cp "${conf}" "${backup}"; then
+        warn "备份 moonraker.conf 失败，已跳过 Moonraker 自动配置: ${backup}"
+        return
+    fi
+    if ! cp "${tmp2}" "${conf}"; then
+        warn "写入 moonraker.conf 失败，已保留备份: ${backup}"
+        return
+    fi
+    rm -f "${tmp1}" "${tmp2}" || warn "清理 Moonraker 临时文件失败: ${tmp}"
 
     echo "[MOONRAKER] 已更新 ${conf}"
     echo "            备份文件: ${backup}"
@@ -352,7 +404,7 @@ function patch_moonraker_conf {
     if [ "${changed}" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
         if systemctl list-units --full -all -t service --no-legend 2>/dev/null | grep -qE '(^| )moonraker(@|[-_.a-zA-Z0-9]*\.service|\.service)'; then
             echo "[POST-INSTALL] 重启 Moonraker 服务..."
-            sudo systemctl restart moonraker
+            sudo systemctl restart moonraker || warn "重启 moonraker.service 失败，请运行 systemctl status moonraker 查看原因。"
         else
             echo "[MOONRAKER] 未检测到 moonraker.service，已跳过服务重启。"
         fi
