@@ -21,6 +21,7 @@
 import logging
 
 PERSIST_CURRENT_TOOL = 'current_tool'
+SPOOL_ID_VAR_TMPL = 'tool_%d_spool_id'
 
 # 等温阈值：目标温度低于此值视为未加热/冷却中，跳过等温（单位 °C）
 HEAT_WAIT_MIN_TARGET = 50.
@@ -43,6 +44,7 @@ class Multitool:
             'accel_swap', 8000., above=0.)
         self.untool_safe_z = config.getfloat(
             'untool_safe_z', 10., minval=0.)
+        self.sync_active_spool = config.getboolean('sync_active_spool', True)
 
         # ---- 内存状态 ----
         self.current_tool = -1   # -1 表示无热端
@@ -50,6 +52,8 @@ class Multitool:
         self.active = False      # 是否正在切换中
         self.change_from_tool = -1
         self.change_to_tool = -1
+        self._spool_ids = [0] * self.tool_count
+        self._spoolman_sync_warned = False
 
         # print_stats.state 单点轮询：子模块通过
         # register_print_state_listener 注册回调，避免各自重复轮询。
@@ -75,12 +79,24 @@ class Multitool:
                 self.current_tool = int(v.get(PERSIST_CURRENT_TOOL, -1))
             except (TypeError, ValueError):
                 self.current_tool = -1
+            self._load_spool_ids(v)
 
         # 启动统一的 print_stats.state 轮询定时器（子模块共享）
         reactor = self.printer.get_reactor()
         reactor.register_timer(
             self._poll_print_state,
             reactor.monotonic() + PRINT_STATE_POLL_S)
+        if self.sync_active_spool:
+            reactor.register_callback(self._sync_active_spool_event)
+
+    def _load_spool_ids(self, values):
+        values = values or {}
+        for tool in range(self.tool_count):
+            try:
+                self._spool_ids[tool] = int(
+                    values.get(SPOOL_ID_VAR_TMPL % tool, 0) or 0)
+            except (TypeError, ValueError):
+                self._spool_ids[tool] = 0
 
     # ------------------------------------------------------------------
     # print_stats.state 单点轮询 + 分发
@@ -118,7 +134,7 @@ class Multitool:
     def _on_connect(self):
         # 所有可能冲突的命令名（gcode_handlers 是公共 dict）
         names = ['T%d' % i for i in range(self.tool_count)]
-        names += ['UNTOOL', 'CHANGE_TOOL']
+        names += ['UNTOOL', 'CHANGE_TOOL', 'SET_TOOL_SPOOL_ID']
         existing = self.gcode.gcode_handlers
         conflicts = [n for n in names if n in existing]
         if conflicts:
@@ -145,6 +161,9 @@ class Multitool:
         self.gcode.register_command(
             'QUERY_TOOL_STATUS', self.cmd_QUERY_TOOL_STATUS,
             desc='查询当前热端编号 / 持久化值')
+        self.gcode.register_command(
+            'SET_TOOL_SPOOL_ID', self.cmd_SET_TOOL_SPOOL_ID,
+            desc='设置工具通道的 Spoolman 料盘 ID')
 
     def _make_tool_handler(self, tool_index):
         def _handler(gcmd):
@@ -182,6 +201,23 @@ class Multitool:
         gcmd.respond_info("基准热端: %s" % base_cn)
         gcmd.respond_info("工具数量: %d (T0..T%d)"
                           % (self.tool_count, self.tool_count - 1))
+        for tool in range(self.tool_count):
+            gcmd.respond_info(
+                "T%d Spoolman ID=%d" % (tool, self._spool_ids[tool]))
+
+    def cmd_SET_TOOL_SPOOL_ID(self, gcmd):
+        tool = gcmd.get_int('TOOL', minval=0, maxval=self.tool_count - 1)
+        spool_id = gcmd.get_int('SPOOL_ID', minval=0)
+        self._spool_ids[tool] = spool_id
+        self._persist_spool_id(tool)
+        if spool_id:
+            gcmd.respond_info(
+                "[multitool] T%d 已关联 Spoolman ID=%d"
+                % (tool, spool_id))
+        else:
+            gcmd.respond_info("[multitool] T%d 已清除 Spoolman 料盘关联" % tool)
+        if tool == self.current_tool:
+            self.on_tool_changed(tool)
 
     # ------------------------------------------------------------------
     # 主流程：换热端
@@ -212,9 +248,7 @@ class Multitool:
             offsets = self.printer.lookup_object('multitool_offsets', None)
             if new_tool != -1 and offsets is not None:
                 offsets.apply(new_tool, base_tool=self.base_tool)
-            filament = self.printer.lookup_object('multitool_filament', None)
-            if filament is not None:
-                filament.on_tool_changed(new_tool)
+            self.on_tool_changed(new_tool)
             return
 
         if new_tool == -1:
@@ -286,8 +320,6 @@ class Multitool:
             if new_tool != -1:
                 if stats is not None:
                     stats.stage_begin('pickup')
-                if filament is not None:
-                    filament.on_tool_changed(new_tool)
                 self._invoke_hook('multitool_pickup_tool', new_tool)
                 if stats is not None:
                     stats.stage_end('pickup')
@@ -319,8 +351,8 @@ class Multitool:
                     stats.tc_commit()
                 else:
                     stats.tc_abort()
-            if not succeeded and filament is not None:
-                filament.on_tool_changed(self.current_tool)
+            if not succeeded:
+                self.on_tool_changed(self.current_tool)
             self.active = False
             self.change_from_tool = -1
             self.change_to_tool = -1
@@ -337,9 +369,46 @@ class Multitool:
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
             % (PERSIST_CURRENT_TOOL, tool))
-        filament = self.printer.lookup_object('multitool_filament', None)
-        if filament is not None:
-            filament.on_tool_changed(tool)
+        self.on_tool_changed(tool)
+
+    def _persist_spool_id(self, tool):
+        if self.printer.lookup_object('save_variables', None) is None:
+            return
+        self.gcode.run_script_from_command(
+            "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
+            % (SPOOL_ID_VAR_TMPL % tool, self._spool_ids[tool]))
+
+    def _sync_active_spool_event(self, _eventtime):
+        self.on_tool_changed(self.current_tool)
+
+    def on_tool_changed(self, tool):
+        if not self.sync_active_spool:
+            return
+        spool_id = None
+        if 0 <= tool < self.tool_count:
+            mapped_id = self._spool_ids[tool]
+            if mapped_id > 0:
+                spool_id = mapped_id
+        self._set_spoolman_active_spool(spool_id)
+
+    def _set_spoolman_active_spool(self, spool_id):
+        webhooks = self.printer.lookup_object('webhooks', None)
+        if webhooks is None:
+            if not self._spoolman_sync_warned:
+                self._spoolman_sync_warned = True
+                self.gcode.respond_info(
+                    "[multitool] 无法同步 Spoolman 当前料盘：webhooks 不可用。")
+            return
+        try:
+            webhooks.call_remote_method(
+                'spoolman_set_active_spool', spool_id=spool_id)
+        except Exception:
+            logging.exception(
+                "multitool: failed to set active Spoolman spool")
+            if not self._spoolman_sync_warned:
+                self._spoolman_sync_warned = True
+                self.gcode.respond_info(
+                    "[multitool] 无法同步 Spoolman 当前料盘；请确认 Moonraker 已启用 [spoolman]。")
 
     # ------------------------------------------------------------------
     # 内部：调用用户钩子
@@ -396,6 +465,8 @@ class Multitool:
             'change_from_tool': self.change_from_tool,
             'change_to_tool': self.change_to_tool,
             'tools': ['T%d' % i for i in range(self.tool_count)],
+            'spool_ids': list(self._spool_ids),
+            'sync_active_spool': self.sync_active_spool,
         }
 
 
