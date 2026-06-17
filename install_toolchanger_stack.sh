@@ -395,6 +395,7 @@ EOF
 EOF
 }
 
-if [ "${BASH_SOURCE[0]:-${0}}" = "${0}" ]; then
+__script_source="${BASH_SOURCE:-${0}}"
+if [ "${__script_source}" = "${0}" ]; then
     main "$@"
 fi
