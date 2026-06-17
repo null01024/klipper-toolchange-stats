@@ -118,6 +118,7 @@ z_hop: 0.4
 feed_z: 600
 accel_swap: 8000
 untool_safe_z: 10
+sync_active_spool: True
 ```
 
 字段说明：
@@ -129,6 +130,7 @@ untool_safe_z: 10
 | `feed_z` | Z 运动速度，单位 mm/min |
 | `accel_swap` | 换头期间临时使用的加速度 |
 | `untool_safe_z` | 当前为无热端时，抓取第一个热端前先移动到的安全 Z |
+| `sync_active_spool` | 换头后自动把 Spoolman 当前料盘切到该工具绑定的料盘，默认 `True` |
 
 主模块会自动维护：
 
@@ -274,8 +276,6 @@ boot_grace_s: 5
 continuation_groups: [1,2],[0],[3]
 runout_continue_length: 50
 runout_continue_poll_s: 0.3
-runout_event_delay: 3
-sync_active_spool: True
 pin_0: ^multihotend:IO0
 pin_1: ^multihotend:IO1
 pin_2: ^multihotend:IO2
@@ -292,7 +292,6 @@ pin_3: ^multihotend:IO3
 | `runout_continue_length` | `0` | 断料后继续消耗多少 mm 净送料再触发续打 / 暂停 |
 | `runout_continue_poll_s` | `0.3` | 延后续打期间轮询挤出机位置的间隔 |
 | `runout_event_delay` | `3` | 断料事件去抖窗口 |
-| `sync_active_spool` | `True` | 换头后自动把 Spoolman 当前料盘切到该通道绑定的料盘；通道未绑定时清空当前料盘 |
 
 模块约定：
 
@@ -303,16 +302,16 @@ pin_3: ^multihotend:IO3
 
 #### Spoolman 通道映射
 
-前端可通过 `SET_TOOL_SPOOL_ID` 为每个工具通道关联 Spoolman 料盘 ID：
+该能力由 `[multitool]` 主模块提供，不依赖 `[multitool_filament]`。前端可通过 `SET_TOOL_SPOOL_ID` 为每个工具通道关联 Spoolman 料盘 ID：
 
 ```gcode
 SET_TOOL_SPOOL_ID TOOL=0 SPOOL_ID=123
 SET_TOOL_SPOOL_ID TOOL=0 SPOOL_ID=0   # 清除关联
 ```
 
-映射会持久化到 `[save_variables]`，变量名为 `tool_0_spool_id`、`tool_1_spool_id` 等；`0` 表示未分配料盘。`QUERY_FILAMENT_STATUS` 会同时输出每个通道的耗材状态和 Spoolman ID。
+映射会持久化到 `[save_variables]`，变量名为 `tool_0_spool_id`、`tool_1_spool_id` 等；`0` 表示未分配料盘。`QUERY_TOOL_STATUS` 会同时输出每个工具通道的 Spoolman ID。
 
-`sync_active_spool` 默认为开启。启用后，`T0..Tn`、`CHANGE_TOOL`、`UNTOOL` 或断料续打引发的当前工具变化都会通过 Moonraker 的 `spoolman_set_active_spool` 远程方法同步 Spoolman 当前料盘：切到已绑定通道时设置对应 spool id，卸下工具或切到未绑定通道时清空当前料盘，避免耗材用量继续记到上一卷料。该功能需要 Moonraker 启用 `[spoolman]`。
+`[multitool] sync_active_spool` 默认为开启。启用后，`T0..Tn`、`CHANGE_TOOL`、`UNTOOL` 或断料续打引发的当前工具变化都会通过 Moonraker 的 `spoolman_set_active_spool` 远程方法同步 Spoolman 当前料盘：切到已绑定通道时设置对应 spool id，卸下工具或切到未绑定通道时清空当前料盘，避免耗材用量继续记到上一卷料。该功能需要 Moonraker 启用 `[spoolman]`。
 
 #### 打印前耗材检查
 
@@ -452,7 +451,7 @@ CALIBRATE_ALL_TOOLS
 | `QUERY_CLAMP_STATUS` | `[multitool_clamp]` | 查询夹紧开关状态 |
 | `QUERY_FILAMENT_STATUS` | `[multitool_filament]` | 查询各通道耗材和续打组 |
 | `CHECK_PRINT_FILAMENT TOOLS=0,1` | `[multitool_filament]` | 打印前检查指定通道耗材 |
-| `SET_TOOL_SPOOL_ID TOOL=<n> SPOOL_ID=<id>` | `[multitool_filament]` | 设置通道的 Spoolman 料盘 ID，`0` 表示清除 |
+| `SET_TOOL_SPOOL_ID TOOL=<n> SPOOL_ID=<id>` | `[multitool]` | 设置通道的 Spoolman 料盘 ID，`0` 表示清除 |
 | `CALIBRATE_TOOL TOOL=<n>` | `calibration.cfg` | 校准单个工具 |
 | `CALIBRATE_ALL_TOOLS` | `calibration.cfg` | 依次校准全部工具 |
 | `TOOL_LOCATE_SENSOR` | `[tools_calibrate]` | 用 T0 定位对刀传感器 |
