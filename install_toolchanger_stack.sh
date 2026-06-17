@@ -186,6 +186,20 @@ function run_plugin_installer {
     bash "${installer}" || die "执行下载的插件安装脚本失败: ${installer_url}"
 }
 
+function check_existing_mainsail {
+    echo
+    echo "========================================="
+    echo "- 检查原版 Mainsail 前端 -"
+    echo "========================================="
+    echo
+
+    if [ ! -d "${MAINSAIL_PATH}" ] || [ ! -f "${MAINSAIL_PATH}/index.html" ]; then
+        die "未检测到原版 Mainsail 前端: ${MAINSAIL_PATH}。请先通过 KIAUH 安装原版 Mainsail 前端后，再重新运行本脚本。"
+    fi
+
+    echo "[OK] 已检测到 Mainsail 前端: ${MAINSAIL_PATH}"
+}
+
 function find_release_root {
     local extract_dir="${1}"
     local child count found
@@ -425,6 +439,7 @@ GH_PROXY: ${GH_PROXY:-未启用}
 EOF
 
     preflight_checks
+    check_existing_mainsail
     run_plugin_installer
     install_or_update_mainsail_toolchanger
     patch_moonraker_conf
