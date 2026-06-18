@@ -64,15 +64,6 @@ Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当
 
 ## 2. 安装方法（单独本插件）
 
-### 前置条件
-
-确认 Klipper 已安装并运行，且 `printer.cfg` 中已经配置 `[save_variables]`：
-
-```cfg
-[save_variables]
-filename: ~/printer_data/config/myvariables.cfg
-```
-
 ### 一键安装
 
 在打印机 SSH 终端执行：
