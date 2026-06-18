@@ -42,6 +42,10 @@ class MultitoolXYGuard:
         self.load_register = config.get('load_register', 'SG_RESULT')
         self.load_value_mask = config.getint(
             'load_value_mask', 0x3ff, minval=0)
+        self.load_xy_move_threshold = config.getfloat(
+            'load_xy_move_threshold', 0.02, minval=0.)
+        self.load_queue_time_threshold = config.getfloat(
+            'load_queue_time_threshold', 0.05, minval=0.)
 
         self._armed = False
         self._stage = None
@@ -58,6 +62,7 @@ class MultitoolXYGuard:
         self._record_samples = []
         self._record_error = None
         self._record_timer = None
+        self._last_sample_pos = None
         self._last_print_state = None
 
         buttons = self.printer.load_object(config, 'buttons')
@@ -128,6 +133,7 @@ class MultitoolXYGuard:
         self._record_start = eventtime
         self._record_samples = []
         self._record_error = None
+        self._last_sample_pos = None
         self.gcode.respond_info(
             "[XY 负载记录] 开始记录 X/Y TMC 负载 (reason=%s, interval=%.3fs)"
             % (reason, self.load_sample_interval_s))
@@ -149,10 +155,18 @@ class MultitoolXYGuard:
         try:
             x = self._read_axis_load('X')
             y = self._read_axis_load('Y')
+            motion = self._sample_motion()
+            tc = self.printer.lookup_object('multitool', None)
             self._record_samples.append({
                 't': round(eventtime - self._record_start, 6),
                 'x': x,
                 'y': y,
+                'motion': motion,
+                'toolchange': {
+                    'active': bool(tc.active) if tc is not None else False,
+                    'stage': self._stage,
+                    'current_tool': tc.current_tool if tc is not None else -1,
+                },
             })
         except Exception as e:
             logging.exception("multitool_xy_guard: sample load error")
@@ -179,6 +193,57 @@ class MultitoolXYGuard:
             'diag': 'PRESSED' if self._raw[axis] else 'RELEASED',
         }
 
+    def _sample_motion(self):
+        toolhead = self.printer.lookup_object('toolhead', None)
+        if toolhead is None:
+            return {'error': 'missing_toolhead'}
+        try:
+            pos = toolhead.get_position()
+            st = toolhead.get_status(self.reactor.monotonic())
+        except Exception as e:
+            return {'error': str(e)}
+        cur = {
+            'x': round(pos[0], 6),
+            'y': round(pos[1], 6),
+            'z': round(pos[2], 6),
+            'e': round(pos[3], 6),
+        }
+        prev = self._last_sample_pos
+        self._last_sample_pos = cur
+        print_time = float(st.get('print_time', 0.) or 0.)
+        estimated_time = float(st.get('estimated_print_time', 0.) or 0.)
+        queue_time = max(0., print_time - estimated_time)
+        queue_active = queue_time >= self.load_queue_time_threshold
+        if prev is None:
+            return {
+                'pos': cur,
+                'delta': {'x': 0., 'y': 0., 'z': 0., 'e': 0., 'xy': 0.},
+                'queue_time': round(queue_time, 6),
+                'queue_active': queue_active,
+                'xy_command_changed': False,
+                'moving_xy': queue_active,
+            }
+        dx = cur['x'] - prev['x']
+        dy = cur['y'] - prev['y']
+        dz = cur['z'] - prev['z']
+        de = cur['e'] - prev['e']
+        xy = (dx * dx + dy * dy) ** 0.5
+        xy_changed = xy >= self.load_xy_move_threshold
+        return {
+            'pos': cur,
+            'delta': {
+                'x': round(dx, 6),
+                'y': round(dy, 6),
+                'z': round(dz, 6),
+                'e': round(de, 6),
+                'xy': round(xy, 6),
+            },
+            'queue_time': round(queue_time, 6),
+            'queue_active': queue_active,
+            'xy_command_changed': xy_changed,
+            'moving_xy': xy_changed or queue_active,
+        }
+
     def _write_recording(self, eventtime, reason):
         dirname = os.path.dirname(self.load_output_path)
         if dirname and not os.path.isdir(dirname):
@@ -190,6 +255,8 @@ class MultitoolXYGuard:
             'reason': reason,
             'duration_s': round(duration, 6),
             'sample_interval_s': self.load_sample_interval_s,
+            'xy_move_threshold': self.load_xy_move_threshold,
+            'queue_time_threshold': self.load_queue_time_threshold,
             'register': self.load_register,
             'value_mask': self.load_value_mask,
             'tmc': {'x': self.x_tmc, 'y': self.y_tmc},

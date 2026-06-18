@@ -301,9 +301,11 @@ x_tmc: tmc2209 stepper_x
 y_tmc: tmc2209 stepper_y
 load_register: SG_RESULT
 load_value_mask: 1023
+load_xy_move_threshold: 0.02
+load_queue_time_threshold: 0.05
 ```
 
-启用 `load_debug` 且 `load_auto_record` 为 `True` 时，模块会在 `print_stats.state` 进入 `printing` 后开始采样，打印完成、取消或错误时保存 JSON。也可以用 `START_XY_LOAD_RECORDING` 和 `STOP_XY_LOAD_RECORDING` 手动控制。仓库根目录的 `driver-load-viewer.html` 可以直接导入 `driver.json`，预览 X/Y 曲线并输出 TMC2209 `driver_SGTHRS` 起点建议。
+启用 `load_debug` 且 `load_auto_record` 为 `True` 时，模块会在 `print_stats.state` 进入 `printing` 后开始采样，打印完成、取消或错误时保存 JSON。每个样本会同时记录 toolhead 命令位置、相邻样本位移、运动队列时间和 `moving_xy` 标记，便于过滤静止/等待样本。也可以用 `START_XY_LOAD_RECORDING` 和 `STOP_XY_LOAD_RECORDING` 手动控制。仓库根目录的 `driver-load-viewer.html` 可以直接导入 `driver.json`，预览 X/Y 曲线并输出 TMC2209 `driver_SGTHRS` 起点建议。
 
 
 ### 3.6 换头统计配置
