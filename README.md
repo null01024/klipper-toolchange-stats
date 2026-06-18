@@ -1,6 +1,6 @@
 # klipper-toolchange-stats
 
-Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当前热端状态保存、偏移应用、夹紧检测、换头统计、耗材检测、断料续打和自动对刀校准；用户只需要在配置中实现两个机械动作钩子。
+Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当前热端状态保存、偏移应用、夹紧检测、XY 防撞检测、换头统计、耗材检测、断料续打和自动对刀校准；用户只需要在配置中实现两个机械动作钩子。
 
 ## 目录
 
@@ -13,9 +13,10 @@ Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当
 - [3.2 换头钩子配置](#32-换头钩子配置)
 - [3.3 偏移管理配置](#33-偏移管理配置)
 - [3.4 夹紧检测配置](#34-夹紧检测配置)
-- [3.5 换头统计配置](#35-换头统计配置)
-- [3.6 耗材检测与断料续打配置](#36-耗材检测与断料续打配置)
-- [3.7 自动对刀校准配置](#37-自动对刀校准配置)
+- [3.5 换热端过程 XY 防撞检测配置](#35-换热端过程-xy-防撞检测配置)
+- [3.6 换头统计配置](#36-换头统计配置)
+- [3.7 耗材检测与断料续打配置](#37-耗材检测与断料续打配置)
+- [3.8 自动对刀校准配置](#38-自动对刀校准配置)
 - [4. 常用命令](#4-常用命令)
 - [5. 安装验证](#5-安装验证)
 - [6. 故障排查](#6-故障排查)
@@ -30,7 +31,7 @@ Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当
 - 注册 `T0..T{n-1}`、`UNTOOL`、`CHANGE_TOOL` 等命令。
 - 在换头时自动抬 Z、临时切换加速度、调用用户机械钩子、等待热端温度、恢复状态。
 - 自动维护 `current_tool`，并通过 `[save_variables]` 持久化。
-- 可选启用偏移、夹紧、统计、耗材检测、断料续打、自动对刀等模块。
+- 可选启用偏移、夹紧、XY 防撞、统计、耗材检测、断料续打、自动对刀等模块。
 
 用户只需要在 `multitool_release_tool` 和 `multitool_pickup_tool` 两个宏里写自己机器的真实机械动作。
 
@@ -40,7 +41,7 @@ Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当
 
 - Klipper 多热端或多工具头的机器。
 - 需要用 `T0`、`T1` 这类命令切换工具的机器。
-- 希望在换头流程中自动处理夹紧检测、XYZ 偏移、耗材检查和换头计时的配置。
+- 希望在换头流程中自动处理夹紧检测、XY 防撞检测、XYZ 偏移、耗材检查和换头计时的配置。
 - 使用接触式传感器做多工具头自动对刀的机器。
 
 不适合：
@@ -54,6 +55,7 @@ Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当
 | `[multitool]` | 必需 | 主模块，注册换头命令并编排换头流程 |
 | `[multitool_offsets]` | 可选 | 自动应用各热端 XYZ 偏移，支持 Z 自适应基准 |
 | `[multitool_clamp]` | 可选 | 夹紧开关检测，换头前后自动校验 |
+| `[multitool_xy_guard]` | 可选 | 换热端 release/pickup 过程中监听 XY DIAG，检测撞车或严重卡顿 |
 | `[multitool_stats]` | 可选 | 自动统计换头次数、总耗时、阶段耗时 |
 | `[multitool_filament]` | 可选 | 各热端耗材检测、打印前检查、断料续打 |
 | `[tools_calibrate]` | 可选 | 接触式自动对刀校准，配合 `calibration.cfg` 写入偏移 |
@@ -256,7 +258,55 @@ settle_ms: 50
 QUERY_CLAMP_STATUS
 ```
 
-### 3.5 换头统计配置
+### 3.5 换热端过程 XY 防撞检测配置
+
+启用 `[multitool_xy_guard]` 后，插件会在 `multitool_release_tool` 和 `multitool_pickup_tool` 两个换热端机械钩子运行期间监听 X/Y TMC DIAG：
+
+```cfg
+[multitool_xy_guard]
+x_diag_pin: ^mcu:X_DIAG
+y_diag_pin: ^mcu:Y_DIAG
+settle_ms: 20
+```
+
+字段说明：
+
+| 字段 | 说明 |
+|---|---|
+| `x_diag_pin` | X 轴 TMC DIAG 输入引脚，使用 Klipper 的 `^`、`!`、`~` 修饰符调整电平 |
+| `y_diag_pin` | Y 轴 TMC DIAG 输入引脚，使用 Klipper 的 `^`、`!`、`~` 修饰符调整电平 |
+| `settle_ms` | 校验时额外等待 buttons 回调的时间 |
+
+模块约定 `PRESSED = DIAG 已触发`。如果实际状态相反，请通过 pin 的 `!` 反相修饰符调整。
+
+StallGuard 触发阈值不在本模块设置，而是在 `[tmc2209 stepper_x]`、`[tmc2209 stepper_y]` 等 TMC 驱动配置中设置，例如 `driver_SGTHRS`；不同驱动型号使用对应的 StallGuard 参数。
+
+触发后模块只会像夹紧检测一样输出错误并抛出 `command_error`，不会执行 `CANCEL_PRINT`、`G0/G1`、`G28` 或其他移动命令。它只检测换热端过程中的撞车或严重卡顿，不检测普通打印过程，也不检测已经发生但当前不再卡顿的 XY 偏移。
+
+排查命令：
+
+```gcode
+QUERY_XY_GUARD_STATUS
+```
+
+负载记录调试模式默认关闭；需要完整记录一次打印过程时，可临时启用：
+
+```cfg
+[multitool_xy_guard]
+load_debug: True
+load_auto_record: True
+load_sample_interval_s: 1.0
+load_output_path: ~/printer_data/config/multitool/driver.json
+x_tmc: tmc2209 stepper_x
+y_tmc: tmc2209 stepper_y
+load_register: SG_RESULT
+load_value_mask: 1023
+```
+
+启用 `load_debug` 且 `load_auto_record` 为 `True` 时，模块会在 `print_stats.state` 进入 `printing` 后开始采样，打印完成、取消或错误时保存 JSON。也可以用 `START_XY_LOAD_RECORDING` 和 `STOP_XY_LOAD_RECORDING` 手动控制。仓库根目录的 `driver-load-viewer.html` 可以直接导入 `driver.json`，预览 X/Y 曲线并输出 TMC2209 `driver_SGTHRS` 起点建议。
+
+
+### 3.6 换头统计配置
 
 启用 `[multitool_stats]` 后，换头统计完全自动运行：
 
@@ -280,7 +330,7 @@ QUERY_CLAMP_STATUS
 - 打印结束、取消或错误时输出本次打印和历史累计统计。
 - 每次成功换头后保存历史累计到 `[save_variables]`。
 
-### 3.6 耗材检测与断料续打配置
+### 3.7 耗材检测与断料续打配置
 
 启用 `[multitool_filament]` 后，每个工具头需要一个耗材检测 pin。通道数量直接复用 `[multitool] tool_count`。
 
@@ -392,7 +442,7 @@ RESUME
 QUERY_FILAMENT_STATUS
 ```
 
-### 3.7 自动对刀校准配置
+### 3.8 自动对刀校准配置
 
 `calibration.cfg` 会由安装脚本复制到：
 
@@ -463,6 +513,9 @@ CALIBRATE_ALL_TOOLS
 | `CHANGE_TOOL T=<n>` | `[multitool]` | 切换工具，`T=-1` 表示卸下 |
 | `QUERY_TOOL_STATUS` | `[multitool]` | 查询当前工具、持久化值、基准工具 |
 | `QUERY_CLAMP_STATUS` | `[multitool_clamp]` | 查询夹紧开关状态 |
+| `QUERY_XY_GUARD_STATUS` | `[multitool_xy_guard]` | 查询换热端过程 XY 防撞检测状态 |
+| `START_XY_LOAD_RECORDING` | `[multitool_xy_guard]` | 手动开始记录 X/Y TMC 负载数据 |
+| `STOP_XY_LOAD_RECORDING` | `[multitool_xy_guard]` | 手动停止记录并保存 `driver.json` |
 | `QUERY_FILAMENT_STATUS` | `[multitool_filament]` | 查询各通道耗材和续打组 |
 | `CHECK_PRINT_FILAMENT TOOLS=0,1` | `[multitool_filament]` | 打印前检查指定通道耗材 |
 | `SET_TOOL_SPOOL_ID TOOL=<n> SPOOL_ID=<id>` | `[multitool]` | 设置通道的 Spoolman 料盘 ID，`0` 表示清除 |
@@ -500,6 +553,9 @@ QUERY_TOOL_STATUS
 
 ```gcode
 QUERY_CLAMP_STATUS
+QUERY_XY_GUARD_STATUS
+START_XY_LOAD_RECORDING
+STOP_XY_LOAD_RECORDING
 QUERY_FILAMENT_STATUS
 CHECK_PRINT_FILAMENT TOOLS=0,1
 CALIBRATE_TOOL TOOL=0
@@ -516,6 +572,7 @@ CALIBRATE_TOOL TOOL=0
 | 执行 `T0` 时报钩子未实现 | 替换默认 `multitool_release_tool` / `multitool_pickup_tool` 中的 `action_raise_error` |
 | 夹紧状态相反 | 调整 `[multitool_clamp] pin` 的 `!` 反相修饰符，目标是 `PRESSED = 已夹紧` |
 | 夹紧检测启动后状态未知 | buttons 只在电平变化时回调；检查接线和 pin 修饰符，必要时手动触发一次开关 |
+| XY 防撞检测不触发或误触发 | 检查 DIAG 接线、pin 反相修饰符，以及 TMC StallGuard 阈值（如 `driver_SGTHRS`） |
 | 换头前提示目标工具无耗材 | 检查 `[multitool_filament] pin_n` 接线、电平修饰符和实际装料状态 |
 | `CHECK_PRINT_FILAMENT` 未检查任何通道 | 切片器没有传入 `TOOLS`，检查 start gcode 和 `PRINT_START` 参数转发 |
 | 偏移没有生效 | 确认启用了 `[multitool_offsets]`，并且 `[save_variables]` 中存在 `t{n}_offset_x/y/z` |
@@ -559,10 +616,12 @@ klipper-toolchange-stats/
 ├── install.sh
 ├── multitool_config.cfg
 ├── calibration.cfg
+├── driver-load-viewer.html
 └── klipper/extras/
     ├── multitool.py
     ├── multitool_offsets.py
     ├── multitool_clamp.py
+    ├── multitool_xy_guard.py
     ├── multitool_stats.py
     ├── multitool_filament.py
     └── tools_calibrate.py
