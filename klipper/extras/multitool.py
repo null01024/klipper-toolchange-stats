@@ -46,6 +46,8 @@ class Multitool:
         self.untool_safe_z = config.getfloat(
             'untool_safe_z', 10., minval=0.)
         self.sync_active_spool = config.getboolean('sync_active_spool', True)
+        self.sync_active_extruder = config.getboolean(
+            'sync_active_extruder', True)
 
         # ---- 内存状态 ----
         self.current_tool = -1   # -1 表示无热端
@@ -80,6 +82,9 @@ class Multitool:
                 self.current_tool = int(v.get(PERSIST_CURRENT_TOOL, -1))
             except (TypeError, ValueError):
                 self.current_tool = -1
+            if (self.current_tool < -1
+                    or self.current_tool >= self.tool_count):
+                self.current_tool = -1
             self._load_spool_ids(v)
 
         # 启动统一的 print_stats.state 轮询定时器（子模块共享）
@@ -89,6 +94,8 @@ class Multitool:
             reactor.monotonic() + PRINT_STATE_POLL_S)
         if self.sync_active_spool:
             reactor.register_callback(self._sync_active_spool_event)
+        if self.sync_active_extruder:
+            reactor.register_callback(self._sync_active_extruder_event)
 
     def _load_spool_ids(self, values):
         values = values or {}
@@ -249,6 +256,7 @@ class Multitool:
             offsets = self.printer.lookup_object('multitool_offsets', None)
             if new_tool != -1 and offsets is not None:
                 offsets.apply(new_tool, base_tool=self.base_tool)
+            self._sync_active_extruder(new_tool)
             self.on_tool_changed(new_tool)
             return
 
@@ -330,6 +338,9 @@ class Multitool:
 
             # ---- 抓取新热端 ----
             if new_tool != -1:
+                # pickup 钩子可能会执行 prime/补偿挤出，
+                # 所以必须在抓取动作开始前切换挤出保护和 E 运动队列。
+                self._sync_active_extruder(new_tool)
                 if stats is not None:
                     stats.stage_begin('pickup')
                 if xy_guard is not None:
@@ -347,7 +358,7 @@ class Multitool:
                     stats.stage_end('pickup')
                 if clamp is not None:
                     clamp.assert_state('clamped', reason='抓取后校验')
-                self._set_current_tool(new_tool)
+                self._set_current_tool(new_tool, sync_extruder=False)
 
                 # 等温
                 if stats is not None:
@@ -374,6 +385,7 @@ class Multitool:
                 else:
                     stats.tc_abort()
             if not succeeded:
+                self._sync_active_extruder(self.current_tool)
                 self.on_tool_changed(self.current_tool)
             self.active = False
             self.change_from_tool = -1
@@ -386,11 +398,13 @@ class Multitool:
     # ------------------------------------------------------------------
     # 内部：状态写入 + 落盘
     # ------------------------------------------------------------------
-    def _set_current_tool(self, tool):
+    def _set_current_tool(self, tool, sync_extruder=True):
         self.current_tool = tool
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
             % (PERSIST_CURRENT_TOOL, tool))
+        if sync_extruder:
+            self._sync_active_extruder(tool)
         self.on_tool_changed(tool)
 
     def _persist_spool_id(self, tool):
@@ -402,6 +416,30 @@ class Multitool:
 
     def _sync_active_spool_event(self, _eventtime):
         self.on_tool_changed(self.current_tool)
+
+    def _sync_active_extruder_event(self, _eventtime):
+        self._sync_active_extruder(self.current_tool)
+
+    def _tool_extruder_name(self, tool):
+        return 'extruder' if tool == 0 else 'extruder%d' % tool
+
+    def _sync_active_extruder(self, tool):
+        if not self.sync_active_extruder:
+            return
+        if tool < 0:
+            self.gcode.run_script_from_command(
+                'SYNC_EXTRUDER_MOTION EXTRUDER=extruder MOTION_QUEUE=')
+            return
+        section = self._tool_extruder_name(tool)
+        if self.printer.lookup_object(section, None) is None:
+            raise self.printer.command_error(
+                '[multitool] 无法同步挤出保护：未找到 [%s] section。'
+                % section)
+        self.gcode.run_script_from_command(
+            'ACTIVATE_EXTRUDER EXTRUDER=%s' % section)
+        self.gcode.run_script_from_command(
+            'SYNC_EXTRUDER_MOTION EXTRUDER=extruder MOTION_QUEUE=%s'
+            % section)
 
     def on_tool_changed(self, tool):
         if not self.sync_active_spool:
@@ -489,6 +527,7 @@ class Multitool:
             'tools': ['T%d' % i for i in range(self.tool_count)],
             'spool_ids': list(self._spool_ids),
             'sync_active_spool': self.sync_active_spool,
+            'sync_active_extruder': self.sync_active_extruder,
         }
 
 
