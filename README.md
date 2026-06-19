@@ -133,6 +133,10 @@ accel_swap: 8000
 untool_safe_z: 10
 sync_active_spool: True
 sync_active_extruder: True
+# 共用一个物理 E 步进、T1..Tn 只做温控时保持 True；独立 E 步进机器设 False
+sync_extruder_motion: True
+extruder_motion_sync_stepper: extruder
+default_pressure_advance_extruder: extruder
 ```
 
 字段说明：
@@ -145,7 +149,10 @@ sync_active_extruder: True
 | `accel_swap` | 换头期间临时使用的加速度 |
 | `untool_safe_z` | 当前为无热端时，抓取第一个热端前先移动到的安全 Z |
 | `sync_active_spool` | 换头后自动把 Spoolman 当前料盘切到该工具绑定的料盘，默认 `True` |
-| `sync_active_extruder` | 换头后自动同步 Klipper active extruder，并把 `[extruder]` 物理 E 步进队列同步到当前热端，默认 `True` |
+| `sync_active_extruder` | 换头后自动同步 Klipper active extruder，默认 `True` |
+| `sync_extruder_motion` | 是否执行 `SYNC_EXTRUDER_MOTION`。单物理 E 步进多热端设 `True`，独立多 E 步进多热端设 `False`，默认 `True` |
+| `extruder_motion_sync_stepper` | `sync_extruder_motion=True` 时要同步的共享 E 步进名，默认 `extruder` |
+| `default_pressure_advance_extruder` | 可选。设置后，未指定 `EXTRUDER=` 的 `SET_PRESSURE_ADVANCE` 会作用到该挤出步进，例如共用物理 E 步进时填 `extruder` |
 
 主模块会自动维护：
 
@@ -556,6 +563,7 @@ CALIBRATE_TOOL TOOL=0
 | 偏移没有生效 | 确认启用了 `[multitool_offsets]`，并且 `[save_variables]` 中存在 `t{n}_offset_x/y/z` |
 | 重启后当前工具丢失 | 检查 `[save_variables]` 是否配置正确，变量文件是否可写 |
 | 切到 T1/T2 后仍按 T0 温度报冷挤出 | 确认 `[multitool] sync_active_extruder` 未关闭，且存在对应 `[extruder1]`、`[extruder2]` section |
+| `SET_PRESSURE_ADVANCE` 报 `Active extruder does not have a stepper` | 共用物理 E 步进且 T1..Tn 不带 stepper 时，在 `[multitool]` 设置 `default_pressure_advance_extruder: extruder`；独立多 E 步进机器应设置 `sync_extruder_motion: False` |
 | `M109 S200` 不自动作用于当前工具 | 这是预期行为。本插件不重写 `M109`，需要用户自行写宏 |
 
 ## 7. 更新、迁移与许可证
