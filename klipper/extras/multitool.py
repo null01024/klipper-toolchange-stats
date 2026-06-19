@@ -48,6 +48,12 @@ class Multitool:
         self.sync_active_spool = config.getboolean('sync_active_spool', True)
         self.sync_active_extruder = config.getboolean(
             'sync_active_extruder', True)
+        self.sync_extruder_motion = config.getboolean(
+            'sync_extruder_motion', True)
+        self.extruder_motion_sync_stepper = config.get(
+            'extruder_motion_sync_stepper', 'extruder').strip()
+        self.default_pressure_advance_extruder = config.get(
+            'default_pressure_advance_extruder', '').strip()
 
         # ---- 内存状态 ----
         self.current_tool = -1   # -1 表示无热端
@@ -172,6 +178,7 @@ class Multitool:
         self.gcode.register_command(
             'SET_TOOL_SPOOL_ID', self.cmd_SET_TOOL_SPOOL_ID,
             desc='设置工具通道的 Spoolman 料盘 ID')
+        self._patch_default_pressure_advance()
 
     def _make_tool_handler(self, tool_index):
         def _handler(gcmd):
@@ -420,6 +427,40 @@ class Multitool:
     def _sync_active_extruder_event(self, _eventtime):
         self._sync_active_extruder(self.current_tool)
 
+    def _patch_default_pressure_advance(self):
+        target = self.default_pressure_advance_extruder
+        if not target:
+            return
+        mux = getattr(self.gcode, 'mux_commands', {}).get(
+            'SET_PRESSURE_ADVANCE')
+        if mux is None:
+            raise self.printer.command_error(
+                "[multitool] 无法覆写 SET_PRESSURE_ADVANCE 默认目标："
+                "Klipper 尚未注册该命令。")
+        key, values = mux
+        if key != 'EXTRUDER':
+            raise self.printer.command_error(
+                "[multitool] 无法覆写 SET_PRESSURE_ADVANCE 默认目标："
+                "命令 mux key=%s，不是 EXTRUDER。" % key)
+        target_handler = values.get(target)
+        if target_handler is None:
+            raise self.printer.command_error(
+                "[multitool] default_pressure_advance_extruder=%s "
+                "无效：未找到对应 SET_PRESSURE_ADVANCE EXTRUDER 入口。"
+                % target)
+        if None not in values:
+            raise self.printer.command_error(
+                "[multitool] 无法覆写 SET_PRESSURE_ADVANCE 默认目标："
+                "Klipper 未注册默认入口。")
+
+        def _default_pressure_advance(gcmd):
+            target_handler(gcmd)
+
+        values[None] = _default_pressure_advance
+        self.gcode.respond_info(
+            "[multitool] 未指定 EXTRUDER 的 SET_PRESSURE_ADVANCE "
+            "将作用于 %s" % target)
+
     def _tool_extruder_name(self, tool):
         return 'extruder' if tool == 0 else 'extruder%d' % tool
 
@@ -427,8 +468,8 @@ class Multitool:
         if not self.sync_active_extruder:
             return
         if tool < 0:
-            self.gcode.run_script_from_command(
-                'SYNC_EXTRUDER_MOTION EXTRUDER=extruder MOTION_QUEUE=')
+            if self.sync_extruder_motion:
+                self._sync_extruder_motion('')
             return
         section = self._tool_extruder_name(tool)
         if self.printer.lookup_object(section, None) is None:
@@ -437,9 +478,18 @@ class Multitool:
                 % section)
         self.gcode.run_script_from_command(
             'ACTIVATE_EXTRUDER EXTRUDER=%s' % section)
+        if self.sync_extruder_motion:
+            self._sync_extruder_motion(section)
+
+    def _sync_extruder_motion(self, motion_queue):
+        stepper = self.extruder_motion_sync_stepper
+        if not stepper:
+            raise self.printer.command_error(
+                '[multitool] sync_extruder_motion=True 时必须设置 '
+                'extruder_motion_sync_stepper。')
         self.gcode.run_script_from_command(
-            'SYNC_EXTRUDER_MOTION EXTRUDER=extruder MOTION_QUEUE=%s'
-            % section)
+            'SYNC_EXTRUDER_MOTION EXTRUDER=%s MOTION_QUEUE=%s'
+            % (stepper, motion_queue))
 
     def on_tool_changed(self, tool):
         if not self.sync_active_spool:
@@ -528,6 +578,11 @@ class Multitool:
             'spool_ids': list(self._spool_ids),
             'sync_active_spool': self.sync_active_spool,
             'sync_active_extruder': self.sync_active_extruder,
+            'sync_extruder_motion': self.sync_extruder_motion,
+            'extruder_motion_sync_stepper':
+                self.extruder_motion_sync_stepper,
+            'default_pressure_advance_extruder':
+                self.default_pressure_advance_extruder,
         }
 
 
