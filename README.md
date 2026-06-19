@@ -132,6 +132,7 @@ feed_z: 600
 accel_swap: 8000
 untool_safe_z: 10
 sync_active_spool: True
+sync_active_extruder: True
 ```
 
 字段说明：
@@ -144,11 +145,12 @@ sync_active_spool: True
 | `accel_swap` | 换头期间临时使用的加速度 |
 | `untool_safe_z` | 当前为无热端时，抓取第一个热端前先移动到的安全 Z |
 | `sync_active_spool` | 换头后自动把 Spoolman 当前料盘切到该工具绑定的料盘，默认 `True` |
+| `sync_active_extruder` | 换头后自动同步 Klipper active extruder，并把 `[extruder]` 物理 E 步进队列同步到当前热端，默认 `True` |
 
 主模块会自动维护：
 
 - `current_tool = -1` 表示当前无热端。
-- `SAVE_VARIABLE VARIABLE=current_tool ...` 用于重启后恢复状态。
+- `SAVE_VARIABLE VARIABLE=current_tool ...` 用于重启后恢复状态；若开机时工具头上已挂载热端，插件会按该值自动同步 active extruder 和物理 E 步进队列。
 - `T0..T{n-1}`、`UNTOOL`、`CHANGE_TOOL T=<n>`、`QUERY_TOOL_STATUS` 命令。
 
 不要再额外定义 `[gcode_macro T0]`、`[gcode_macro UNTOOL]` 或 `[gcode_macro CHANGE_TOOL]`，否则启动时会报命令冲突。
@@ -553,6 +555,7 @@ CALIBRATE_TOOL TOOL=0
 | `CHECK_PRINT_FILAMENT` 未检查任何通道 | 切片器没有传入 `TOOLS`，检查 start gcode 和 `PRINT_START` 参数转发 |
 | 偏移没有生效 | 确认启用了 `[multitool_offsets]`，并且 `[save_variables]` 中存在 `t{n}_offset_x/y/z` |
 | 重启后当前工具丢失 | 检查 `[save_variables]` 是否配置正确，变量文件是否可写 |
+| 切到 T1/T2 后仍按 T0 温度报冷挤出 | 确认 `[multitool] sync_active_extruder` 未关闭，且存在对应 `[extruder1]`、`[extruder2]` section |
 | `M109 S200` 不自动作用于当前工具 | 这是预期行为。本插件不重写 `M109`，需要用户自行写宏 |
 
 ## 7. 更新、迁移与许可证
