@@ -175,7 +175,7 @@ function run_plugin_installer {
     fi
 
     if [ -n "${installer}" ]; then
-        bash "${installer}" || die "执行插件安装脚本失败: ${installer}"
+        GH_PROXY="${GH_PROXY}" bash "${installer}" || die "执行插件安装脚本失败: ${installer}"
         return
     fi
 
@@ -183,7 +183,7 @@ function run_plugin_installer {
     installer="${tmp}/install.sh"
     installer_url="${KLIPPER_STATS_REPO_RAW%/}/install.sh"
     download_url "${installer_url}" "${installer}"
-    bash "${installer}" || die "执行下载的插件安装脚本失败: ${installer_url}"
+    GH_PROXY="${GH_PROXY}" bash "${installer}" || die "执行下载的插件安装脚本失败: ${installer_url}"
 }
 
 function check_existing_mainsail {

@@ -72,6 +72,12 @@ Klipper 多热端 / 多工具头换头插件。它负责换头流程编排、当
 wget -O - https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install.sh | bash
 ```
 
+如果 GitHub 访问不稳定，可为插件安装脚本启用 HTTP 下载代理：
+
+```bash
+GH_PROXY=https://v6.gh-proxy.org/ wget -O - https://v6.gh-proxy.org/https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install.sh | GH_PROXY=https://v6.gh-proxy.org/ bash
+```
+
 ### 手动安装
 
 ```bash

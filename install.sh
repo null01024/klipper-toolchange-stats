@@ -2,6 +2,8 @@
 # Klipper multitool-stats 安装/更新脚本
 # 用法 (远程):
 #   wget -O - https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install.sh | bash
+# 用法 (远程 + GitHub HTTP 下载代理):
+#   GH_PROXY=https://v6.gh-proxy.org/ wget -O - https://v6.gh-proxy.org/https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install.sh | GH_PROXY=https://v6.gh-proxy.org/ bash
 # 用法 (本地):
 #   bash ~/klipper-toolchange-stats/install.sh
 
@@ -9,6 +11,7 @@ KLIPPER_PATH="${KLIPPER_PATH:-${HOME}/klipper}"
 INSTALL_PATH="${INSTALL_PATH:-${HOME}/klipper-toolchange-stats}"
 CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
 REPO_URL="${REPO_URL:-https://github.com/null01024/klipper-toolchange-stats.git}"
+GH_PROXY="${GH_PROXY:-}"
 
 # 配置在 printer.cfg 中的 include 行（写在文件最顶部）
 INCLUDE_LINE="[include multitool/*.cfg]"
@@ -38,6 +41,27 @@ function require_command {
     fi
 }
 
+function proxy_url {
+    local url="${1}"
+    local proxy="${GH_PROXY}"
+
+    case "${url}" in
+        http://*|https://*) ;;
+        *) printf "%s\n" "${url}"; return ;;
+    esac
+
+    if [ -z "${proxy}" ]; then
+        printf "%s\n" "${url}"
+        return
+    fi
+
+    proxy="${proxy%/}"
+    case "${url}" in
+        "${proxy}/"*) printf "%s\n" "${url}" ;;
+        *) printf "%s/%s\n" "${proxy}" "${url}" ;;
+    esac
+}
+
 function preflight_checks {
     if [ "$EUID" -eq 0 ]; then
         die "不要以 root 身份运行此脚本！请使用普通用户执行，脚本需要时会调用 sudo。"
@@ -63,9 +87,10 @@ function preflight_checks {
 }
 
 function sync_repo {
-    local installdirname installbasename
+    local installdirname installbasename proxied_repo_url
     installdirname="$(dirname "${INSTALL_PATH}")"
     installbasename="$(basename "${INSTALL_PATH}")"
+    proxied_repo_url="$(proxy_url "${REPO_URL}")"
     if [ ! -d "${installdirname}" ]; then
         mkdir -p "${installdirname}" || die "无法创建安装父目录: ${installdirname}"
     fi
@@ -73,7 +98,10 @@ function sync_repo {
 
     if [ ! -d "${INSTALL_PATH}" ]; then
         echo "[DOWNLOAD] 正在克隆仓库..."
-        if git -C "${installdirname}" clone "${REPO_URL}" "${installbasename}"; then
+        if [ -n "${GH_PROXY}" ] && [ "${proxied_repo_url}" != "${REPO_URL}" ]; then
+            echo "           via ${GH_PROXY}"
+        fi
+        if git -C "${installdirname}" clone "${proxied_repo_url}" "${installbasename}"; then
             chmod +x "${INSTALL_PATH}/install.sh" || die "无法设置 install.sh 可执行权限: ${INSTALL_PATH}/install.sh"
             printf "[DOWNLOAD] 克隆完成！\n\n"
         else
@@ -86,7 +114,7 @@ function sync_repo {
         die "${INSTALL_PATH} 已存在，但不是 Git 仓库，无法自动更新。请手动检查该目录，或更换 INSTALL_PATH 后重新运行。"
     fi
 
-    local current_branch status_output
+    local current_branch status_output remote_url fetch_remote
     if ! current_branch="$(git -C "${INSTALL_PATH}" branch --show-current)"; then
         die "读取当前 Git 分支失败: ${INSTALL_PATH}"
     fi
@@ -102,7 +130,15 @@ function sync_repo {
     fi
 
     echo "[UPDATE] 本地已存在仓库，正在更新当前分支 ${current_branch}..."
-    if ! git -C "${INSTALL_PATH}" fetch origin "${current_branch}:refs/remotes/origin/${current_branch}"; then
+    remote_url="$(git -C "${INSTALL_PATH}" config --get remote.origin.url || true)"
+    fetch_remote="${remote_url:-origin}"
+    if [ -n "${remote_url}" ]; then
+        fetch_remote="$(proxy_url "${remote_url}")"
+    fi
+    if [ -n "${GH_PROXY}" ] && [ "${fetch_remote}" != "${remote_url:-origin}" ]; then
+        echo "         via ${GH_PROXY}"
+    fi
+    if ! git -C "${INSTALL_PATH}" fetch "${fetch_remote}" "${current_branch}:refs/remotes/origin/${current_branch}"; then
         die "拉取远端分支 origin/${current_branch} 失败。请检查网络、代理或远端分支是否存在。"
     fi
 
