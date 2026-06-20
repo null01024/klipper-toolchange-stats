@@ -250,10 +250,13 @@ class Multitool:
                 "multitool_pickup_tool) 是否调用了 T*/CHANGE_TOOL/UNTOOL。")
 
         old_tool = self.current_tool
+        requested_tool = new_tool
         filament = self.printer.lookup_object('multitool_filament', None)
         if new_tool != -1 and filament is not None:
             new_tool = filament.resolve_tool_for_pickup(
                 new_tool, reason='换头前耗材检查')
+        if requested_tool != new_tool and new_tool != -1:
+            self._copy_tool_heater_target(requested_tool, new_tool)
 
         if new_tool == old_tool:
             cur_cn = "无热端" if new_tool == -1 else "T%d" % new_tool
@@ -461,6 +464,25 @@ class Multitool:
 
     def _tool_extruder_name(self, tool):
         return 'extruder' if tool == 0 else 'extruder%d' % tool
+
+    def _heater_target(self, tool):
+        if tool < 0 or tool >= self.tool_count:
+            return None
+        extruder = self.printer.lookup_object(
+            self._tool_extruder_name(tool), None)
+        if extruder is None:
+            return None
+        return extruder.get_heater().target_temp
+
+    def _copy_tool_heater_target(self, source_tool, dest_tool):
+        target = self._heater_target(source_tool)
+        if target is None or target <= HEAT_WAIT_MIN_TARGET:
+            return
+        self.gcode.respond_info(
+            "[multitool] T%d 被续打组替代为 T%d，复制目标温度 %.1fC。"
+            % (source_tool, dest_tool, target))
+        self.gcode.run_script_from_command(
+            "M104 T%d S%.1f" % (dest_tool, target))
 
     def _sync_active_extruder(self, tool):
         if not self.sync_active_extruder:
