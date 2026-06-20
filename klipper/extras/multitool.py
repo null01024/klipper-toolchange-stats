@@ -16,8 +16,9 @@
 #   [gcode_macro multitool_release_tool]   入参 TOOL=<int>
 #   [gcode_macro multitool_pickup_tool]    入参 TOOL=<int>
 #
-# M109 不再由本插件重写。多热端场景下用户可自行写 [gcode_macro M109]
-# (rename_existing: M99109)，根据需要把 T 补成 current_tool 后转发给原版。
+# 默认配置模板会用 [gcode_macro M104] / [gcode_macro M109] 覆写温度命令；
+# 本模块提供 MULTITOOL_SET_TEMPERATURE / MULTITOOL_WAIT_TEMPERATURE
+# 给宏复用同一套断料续打组目标解析逻辑。
 
 import logging
 
@@ -148,7 +149,10 @@ class Multitool:
     def _on_connect(self):
         # 所有可能冲突的命令名（gcode_handlers 是公共 dict）
         names = ['T%d' % i for i in range(self.tool_count)]
-        names += ['UNTOOL', 'CHANGE_TOOL', 'SET_TOOL_SPOOL_ID']
+        names += [
+            'UNTOOL', 'CHANGE_TOOL', 'SET_TOOL_SPOOL_ID',
+            'MULTITOOL_SET_TEMPERATURE', 'MULTITOOL_WAIT_TEMPERATURE',
+        ]
         existing = self.gcode.gcode_handlers
         conflicts = [n for n in names if n in existing]
         if conflicts:
@@ -178,6 +182,14 @@ class Multitool:
         self.gcode.register_command(
             'SET_TOOL_SPOOL_ID', self.cmd_SET_TOOL_SPOOL_ID,
             desc='设置工具通道的 Spoolman 料盘 ID')
+        self.gcode.register_command(
+            'MULTITOOL_SET_TEMPERATURE',
+            self.cmd_MULTITOOL_SET_TEMPERATURE,
+            desc='设置工具温度，自动解析断料续打组实际工具')
+        self.gcode.register_command(
+            'MULTITOOL_WAIT_TEMPERATURE',
+            self.cmd_MULTITOOL_WAIT_TEMPERATURE,
+            desc='等待工具温度，自动解析断料续打组实际工具')
         self._patch_default_pressure_advance()
 
     def _make_tool_handler(self, tool_index):
@@ -194,6 +206,25 @@ class Multitool:
     def cmd_CHANGE_TOOL(self, gcmd):
         new_tool = gcmd.get_int('T', minval=-1, maxval=self.tool_count - 1)
         self._do_change_tool(gcmd, new_tool)
+
+    def cmd_MULTITOOL_SET_TEMPERATURE(self, gcmd):
+        requested = gcmd.get_int('TOOL', minval=0, maxval=self.tool_count - 1)
+        target = self._temperature_target(gcmd)
+        command = gcmd.get('COMMAND', 'M104')
+        bypass_filament = gcmd.get_int('BYPASS_FILAMENT', 0, minval=0) != 0
+        tool = self._resolve_temperature_tool(
+            requested, target, command, bypass_filament=bypass_filament)
+        self._set_tool_temperature(tool, target)
+
+    def cmd_MULTITOOL_WAIT_TEMPERATURE(self, gcmd):
+        requested = gcmd.get_int('TOOL', minval=0, maxval=self.tool_count - 1)
+        target = self._temperature_target(gcmd)
+        command = gcmd.get('COMMAND', 'M109')
+        bypass_filament = gcmd.get_int('BYPASS_FILAMENT', 0, minval=0) != 0
+        tool = self._resolve_temperature_tool(
+            requested, target, command, bypass_filament=bypass_filament)
+        if target >= HEAT_WAIT_MIN_TARGET:
+            self._wait_temperature(tool, target)
 
     def cmd_QUERY_TOOL_STATUS(self, gcmd):
         sv = self.printer.lookup_object('save_variables', None)
@@ -250,6 +281,14 @@ class Multitool:
                 "multitool_pickup_tool) 是否调用了 T*/CHANGE_TOOL/UNTOOL。")
 
         old_tool = self.current_tool
+        requested_tool = new_tool
+        filament = self.printer.lookup_object('multitool_filament', None)
+        if new_tool != -1 and filament is not None:
+            new_tool = filament.resolve_tool_for_pickup(
+                new_tool, reason='换头前耗材检查')
+        if requested_tool != new_tool and new_tool != -1:
+            self._copy_tool_heater_target(requested_tool, new_tool)
+
         if new_tool == old_tool:
             cur_cn = "无热端" if new_tool == -1 else "T%d" % new_tool
             gcmd.respond_info(
@@ -275,7 +314,6 @@ class Multitool:
         clamp = self.printer.lookup_object('multitool_clamp', None)
         offsets = self.printer.lookup_object('multitool_offsets', None)
         stats = self.printer.lookup_object('multitool_stats', None)
-        filament = self.printer.lookup_object('multitool_filament', None)
         xy_guard = self.printer.lookup_object('multitool_xy_guard', None)
 
         # 备份 accel；try/finally 保证恢复
@@ -294,12 +332,6 @@ class Multitool:
             if clamp is not None:
                 expect = 'clamped' if old_tool != -1 else 'released'
                 clamp.assert_state(expect, reason='入口校验')
-
-            # ---- 耗材检查（仅抓取新热端时）----
-            # 未配置 [multitool_filament] 时 filament 为 None，视为所有
-            # 工具头都有耗材，不阻塞切换。
-            if new_tool != -1 and filament is not None:
-                filament.assert_loaded(new_tool, reason='换头前耗材检查')
 
             # ---- 准备：保存状态 / 切 accel / 抬升 / 清偏移 ----
             self.gcode.run_script_from_command(
@@ -461,8 +493,65 @@ class Multitool:
             "[multitool] 未指定 EXTRUDER 的 SET_PRESSURE_ADVANCE "
             "将作用于 %s" % target)
 
+    def _resolve_temperature_tool(
+            self, requested, target, command, bypass_filament=False):
+        if requested < 0 or requested >= self.tool_count:
+            raise self.printer.command_error(
+                "[multitool] %s T%d 越界 (应在 0..%d)"
+                % (command, requested, self.tool_count - 1))
+        if bypass_filament:
+            return requested
+        filament = self.printer.lookup_object('multitool_filament', None)
+        if filament is None:
+            return requested
+        try:
+            return filament.resolve_tool_for_pickup(
+                requested, reason='%s 加热耗材检查' % command)
+        except Exception:
+            self.gcode.respond_info(
+                "[multitool] %s T%d 无可用续打工具，按传入物理工具执行。"
+                % (command, requested))
+            return requested
+
+    def _temperature_target(self, gcmd):
+        s = gcmd.get_float('S', 0.)
+        r = gcmd.get_float('R', 0.)
+        return s if s > 0. else r
+
+    def _set_tool_temperature(self, tool, target):
+        self.gcode.run_script_from_command(
+            "M99104 T%d S%.6f" % (tool, target))
+
+    def _wait_temperature(self, tool, target):
+        section = self._tool_extruder_name(tool)
+        if self.printer.lookup_object(section, None) is None:
+            raise self.printer.command_error(
+                "[multitool] 无法等待温度：未找到 [%s] section。" % section)
+        self.gcode.run_script_from_command(
+            "TEMPERATURE_WAIT SENSOR=%s MINIMUM=%.2f MAXIMUM=%.2f"
+            % (section, target - 1.5, target + 1.5))
+
     def _tool_extruder_name(self, tool):
         return 'extruder' if tool == 0 else 'extruder%d' % tool
+
+    def _heater_target(self, tool):
+        if tool < 0 or tool >= self.tool_count:
+            return None
+        extruder = self.printer.lookup_object(
+            self._tool_extruder_name(tool), None)
+        if extruder is None:
+            return None
+        return extruder.get_heater().target_temp
+
+    def _copy_tool_heater_target(self, source_tool, dest_tool):
+        target = self._heater_target(source_tool)
+        if target is None or target <= HEAT_WAIT_MIN_TARGET:
+            return
+        self.gcode.respond_info(
+            "[multitool] T%d 被续打组替代为 T%d，复制目标温度 %.1fC。"
+            % (source_tool, dest_tool, target))
+        self.gcode.run_script_from_command(
+            "M104 T%d S%.1f" % (dest_tool, target))
 
     def _sync_active_extruder(self, tool):
         if not self.sync_active_extruder:
