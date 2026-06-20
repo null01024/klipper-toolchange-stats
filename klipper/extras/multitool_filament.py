@@ -4,8 +4,8 @@
 # 职责：
 #   - 用 buttons helper 集中注册各通道的耗材检测 pin
 #   - 通道电平变化时在控制台输出装载 / 卸载提示 (M118)
-#   - 提供 assert_loaded(channel) 给 multitool 主流程在换头前调用：
-#     目标工具头通道无耗材时阻止切换
+#   - 提供 resolve_tool_for_pickup(tool) 给 multitool 主流程在换头前调用：
+#     目标工具头通道无耗材时，优先切到同续打组内有料工具；全组无料才阻止
 #   - 断料续打：打印中当前热端断料时，自动切到同组下一个有料热端继续打印；
 #     同组无可用热端时正常暂停 (见 continuation_groups)
 #
@@ -25,7 +25,7 @@
 #     状态总览，避免后续 assert_loaded 因 None 而走"未知放行"路径。
 #
 # 通道数：不再单独配置，直接复用 [multitool] 的 tool_count
-#   （通道与工具头一一对应：assert_loaded 的 channel 就是工具头编号）。
+#   （通道与工具头一一对应：检查参数 channel/tool 就是工具头编号）。
 #
 # 断料续打 (continuation_groups)：
 #   - 格式 [1,2],[0],[3]：每个方括号是一个有序续打组。
@@ -310,6 +310,70 @@ class MultitoolFilament:
         return None
 
     # ------------------------------------------------------------------
+    # 为普通换头解析实际目标：
+    #   - 请求工具有料 / 状态未知：仍使用请求工具
+    #   - 请求工具无料且在续打组内：按组顺序找后续有料工具，找不到明确
+    #     有料时可退到状态未知的工具（沿用"未知放行"策略）
+    #   - 请求工具无料且组内全无料：抛错
+    # 这解决多色打印中 T1 断料续打到 T2 后，切到别的颜色再回 T1 时，
+    # 切片器仍发 T1，但实际应继续使用同组有料 T2 的场景。
+    # ------------------------------------------------------------------
+    def resolve_tool_for_pickup(self, requested, reason=''):
+        if requested < 0 or requested >= self.tool_count:
+            return requested
+
+        loaded = self._loaded[requested]
+        if loaded is not False:
+            self.assert_loaded(requested, reason=reason)
+            return requested
+
+        group = self._group_of.get(requested)
+        if group:
+            replacement = self._find_group_replacement(requested)
+            if replacement is not None:
+                self._warn_if_unknown(replacement)
+                self.gcode.respond_info(
+                    "[耗材检查] T%d 无耗材，改用同续打组内的 T%d。"
+                    % (requested, replacement))
+                return replacement
+
+            msg = ("耗材检查失败 (原因=%s)：T%d 所在续打组 [%s] 均无耗材，"
+                   "禁止切换到该组。"
+                   % (reason, requested,
+                      ','.join('T%d' % t for t in group)))
+        else:
+            msg = ("耗材检查失败 (原因=%s)：通道%d 无耗材，禁止切换到该工具头。"
+                   % (reason, requested))
+
+        self.gcode.respond_info(msg)
+        raise self.printer.command_error(msg)
+
+    def _find_group_replacement(self, requested):
+        group = self._group_of.get(requested)
+        if not group:
+            return None
+
+        n = len(group)
+        idx = group.index(requested)
+        unknown = None
+        for i in range(1, n):
+            cand = group[(idx + i) % n]
+            st = self._loaded[cand]
+            if st is True:
+                return cand
+            if st is None and unknown is None:
+                unknown = cand
+        return unknown
+
+    def _warn_if_unknown(self, channel):
+        if self._loaded[channel] is not None:
+            return
+        self.gcode.respond_info(
+            "[耗材检查] 警告: 通道%d 启动后未收到状态上报，"
+            "按有耗材处理以放行换头。若与实际不符请检查 pin 接线 / "
+            "电平修饰符 (! ^ ~)。" % channel)
+
+    # ------------------------------------------------------------------
     # 读取某热端 extruder 的目标温度；查不到 extruder 返回 None。
     # ------------------------------------------------------------------
     def _heater_target(self, tool):
@@ -513,10 +577,7 @@ class MultitoolFilament:
 
         loaded = self._loaded[channel]
         if loaded is None:
-            self.gcode.respond_info(
-                "[耗材检查] 警告: 通道%d 启动后未收到状态上报，"
-                "按有耗材处理以放行换头。若与实际不符请检查 pin 接线 / "
-                "电平修饰符 (! ^ ~)。" % channel)
+            self._warn_if_unknown(channel)
             return
 
         if not loaded:

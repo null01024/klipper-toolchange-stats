@@ -250,6 +250,11 @@ class Multitool:
                 "multitool_pickup_tool) 是否调用了 T*/CHANGE_TOOL/UNTOOL。")
 
         old_tool = self.current_tool
+        filament = self.printer.lookup_object('multitool_filament', None)
+        if new_tool != -1 and filament is not None:
+            new_tool = filament.resolve_tool_for_pickup(
+                new_tool, reason='换头前耗材检查')
+
         if new_tool == old_tool:
             cur_cn = "无热端" if new_tool == -1 else "T%d" % new_tool
             gcmd.respond_info(
@@ -275,7 +280,6 @@ class Multitool:
         clamp = self.printer.lookup_object('multitool_clamp', None)
         offsets = self.printer.lookup_object('multitool_offsets', None)
         stats = self.printer.lookup_object('multitool_stats', None)
-        filament = self.printer.lookup_object('multitool_filament', None)
         xy_guard = self.printer.lookup_object('multitool_xy_guard', None)
 
         # 备份 accel；try/finally 保证恢复
@@ -294,12 +298,6 @@ class Multitool:
             if clamp is not None:
                 expect = 'clamped' if old_tool != -1 else 'released'
                 clamp.assert_state(expect, reason='入口校验')
-
-            # ---- 耗材检查（仅抓取新热端时）----
-            # 未配置 [multitool_filament] 时 filament 为 None，视为所有
-            # 工具头都有耗材，不阻塞切换。
-            if new_tool != -1 and filament is not None:
-                filament.assert_loaded(new_tool, reason='换头前耗材检查')
 
             # ---- 准备：保存状态 / 切 accel / 抬升 / 清偏移 ----
             self.gcode.run_script_from_command(
