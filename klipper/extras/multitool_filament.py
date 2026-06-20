@@ -448,7 +448,9 @@ class MultitoolFilament:
                     % (cur, next_tool))
             script.append("CHANGE_TOOL T=%d" % next_tool)
             # 换头完成后关闭旧热端
-            script.append("M104 T%d S0" % cur)
+            script.append(
+                "MULTITOOL_SET_TEMPERATURE TOOL=%d S0 "
+                "COMMAND=runout_close_old BYPASS_FILAMENT=1" % cur)
             if self._has_macro('multitool_filament_after_swap'):
                 script.append(
                     "multitool_filament_after_swap FROM=%d TO=%d"
