@@ -15,6 +15,8 @@ GH_PROXY="${GH_PROXY:-}"
 FRESH_INSTALL=0
 TOOLCHANGE_SCHEME="custom"
 TOOL_HARDWARE_MODE=""
+INSTALL_MAINSAIL=0
+TOOLCHANGER_STACK_RUNNING="${TOOLCHANGER_STACK_RUNNING:-0}"
 
 # 配置在 printer.cfg 中的 include 行（写在文件最顶部）
 INCLUDE_LINE="[include multitool/*.cfg]"
@@ -105,6 +107,19 @@ function ask_fresh_install {
         FRESH_INSTALL=1
     else
         FRESH_INSTALL=0
+    fi
+    echo
+}
+
+function ask_install_mainsail {
+    if [ "${TOOLCHANGER_STACK_RUNNING}" = "1" ]; then
+        INSTALL_MAINSAIL=0
+        return
+    fi
+    if ask_yes_no_default_no "是否安装/更新配套 Mainsail 前端？选择 y 将调用 install_toolchanger_stack.sh [y/N]: "; then
+        INSTALL_MAINSAIL=1
+    else
+        INSTALL_MAINSAIL=0
     fi
     echo
 }
@@ -427,7 +442,12 @@ function generate_multihotend_config {
     if [ -z "${TOOL_HARDWARE_MODE}" ]; then
         TOOL_HARDWARE_MODE="$(ask_tool_hardware_mode)"
     fi
-    dock_fan_mode="$(ask_dock_fan_mode)"
+    if [ "${TOOL_HARDWARE_MODE}" = "multi_toolhead" ]; then
+        dock_fan_mode="per_tool"
+        echo "[CONFIG] 多工具头模式：dock_fan 固定为每个 extruder 一个风扇。"
+    else
+        dock_fan_mode="$(ask_dock_fan_mode)"
+    fi
     heaters="$(extruder_list "${tool_count}")"
 
     {
@@ -654,12 +674,24 @@ function restart_klipper {
     sudo systemctl restart klipper || die "重启 klipper.service 失败，请运行 systemctl status klipper 查看原因。"
 }
 
+function install_mainsail_frontend_if_requested {
+    local stack_script="${INSTALL_PATH}/install_toolchanger_stack.sh"
+    if [ "${INSTALL_MAINSAIL}" -ne 1 ]; then
+        return
+    fi
+    [ -f "${stack_script}" ] || die "未找到 install_toolchanger_stack.sh: ${stack_script}"
+    echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 Mainsail 前端..."
+    SKIP_PLUGIN_INSTALL=1 TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
+        bash "${stack_script}" || die "安装/更新 Mainsail 前端失败。"
+}
+
 printf "\n=========================================\n"
 echo "- Klipper multitool-stats 安装/更新脚本 -"
 printf "=========================================\n\n"
 
 preflight_checks
 ask_fresh_install
+ask_install_mainsail
 sync_repo
 link_extension
 clean_orphan_links
@@ -677,6 +709,7 @@ if [ "${FRESH_INSTALL}" -eq 1 ]; then
 fi
 patch_printer_cfg
 restart_klipper
+install_mainsail_frontend_if_requested
 
 cat <<EOF
 
