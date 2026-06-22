@@ -37,10 +37,11 @@ class MultitoolXYGuard:
         self._last_time = None
         # None 表示尚未收到 buttons 上报；不能当成 RELEASED 放行。
         self._raw = {'X': None, 'Y': None}
+        self._button_bits = {}
 
         buttons = self.printer.load_object(config, 'buttons')
-        buttons.register_buttons([self.x_diag_pin], self._make_callback('X'))
-        buttons.register_buttons([self.y_diag_pin], self._make_callback('Y'))
+        self._register_diag_button(buttons, 'X', self.x_diag_pin)
+        self._register_diag_button(buttons, 'Y', self.y_diag_pin)
 
         self.printer.register_event_handler('klippy:ready', self._on_ready)
 
@@ -48,12 +49,26 @@ class MultitoolXYGuard:
             'QUERY_XY_GUARD_STATUS', self.cmd_QUERY_XY_GUARD_STATUS,
             desc='查询换热端过程 XY 防撞检测状态')
 
+    def _register_diag_button(self, buttons, axis, pin):
+        buttons.register_buttons([pin], self._make_callback(axis))
+
+        # buttons helper 只在电平变化时调用 callback，但 MCU_buttons 会持续
+        # 扫描并缓存 last_button。这里记录刚注册 pin 的 bit 位，供使用前
+        # 主动刷新当前电平。该逻辑依赖 Klipper buttons.py 内部字段。
+        ppins = self.printer.lookup_object('pins')
+        pin_params = ppins.parse_pin(
+            pin, can_invert=True, can_pullup=True)
+        mcu_buttons = buttons.mcu_buttons[pin_params['chip_name']]
+        bit_index = len(mcu_buttons.pin_list) - 1
+        self._button_bits[axis] = (mcu_buttons, 1 << bit_index)
+
     def _on_ready(self):
         self.reactor.register_callback(
             self._check_initial_report,
             self.reactor.monotonic() + BOOT_GRACE_S)
 
     def _check_initial_report(self, _eventtime):
+        self._refresh_raw_from_buttons()
         unknown = [axis for axis in ('X', 'Y') if self._raw[axis] is None]
         if unknown:
             logging.warning(
@@ -62,6 +77,18 @@ class MultitoolXYGuard:
                 "若状态仍未知，将中断换头。请检查 pin 接线 / 电平修饰符。",
                 BOOT_GRACE_S, ','.join(unknown),
                 self.x_diag_pin, self.y_diag_pin)
+
+    def _refresh_raw_from_buttons(self):
+        eventtime = self.reactor.monotonic()
+        for axis, (mcu_buttons, bit_mask) in self._button_bits.items():
+            # ack_count==0 表示还没收到任何 MCU buttons 扫描样本；保持
+            # UNKNOWN，不伪造 RELEASED。
+            if getattr(mcu_buttons, 'ack_count', 0) <= 0:
+                continue
+            pressed = bool(getattr(mcu_buttons, 'last_button', 0) & bit_mask)
+            self._raw[axis] = pressed
+            if self._armed and pressed and self._fault_axis is None:
+                self._set_fault(axis, eventtime)
 
     def _make_callback(self, axis):
         def _callback(eventtime, state):
@@ -83,6 +110,7 @@ class MultitoolXYGuard:
     # 公共方法：被 multitool 主流程调用
     # ------------------------------------------------------------------
     def arm(self, stage):
+        self._refresh_raw_from_buttons()
         self._armed = True
         self._stage = stage
         self._fault_axis = None
@@ -104,9 +132,11 @@ class MultitoolXYGuard:
 
     def assert_ok(self, reason=''):
         self.gcode.run_script_from_command("M400")
+        self._refresh_raw_from_buttons()
         if self._fault_axis is None:
             if self.settle_ms > 0:
                 self.gcode.run_script_from_command("G4 P%d" % self.settle_ms)
+                self._refresh_raw_from_buttons()
             unknown = [axis for axis in ('X', 'Y')
                        if self._raw[axis] is None]
             if unknown:
@@ -137,6 +167,7 @@ class MultitoolXYGuard:
         return 'PRESSED' if raw else 'RELEASED'
 
     def cmd_QUERY_XY_GUARD_STATUS(self, gcmd):
+        self._refresh_raw_from_buttons()
         gcmd.respond_info("====== XY 防撞检测状态 ======")
         gcmd.respond_info("启用: 是")
         gcmd.respond_info("当前检测窗口: %s"
@@ -155,6 +186,7 @@ class MultitoolXYGuard:
     # 暴露给前端 / 宏
     # ------------------------------------------------------------------
     def get_status(self, eventtime):
+        self._refresh_raw_from_buttons()
         return {
             'armed': self._armed,
             'stage': self._stage,
