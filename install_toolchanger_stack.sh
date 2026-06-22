@@ -22,6 +22,7 @@ MAINSAIL_PATH="${MAINSAIL_PATH:-${HOME}/mainsail}"
 MAINSAIL_TOOLCHANGER_REPO="${MAINSAIL_TOOLCHANGER_REPO:-null01024/mainsail-toolchanger}"
 MAINSAIL_TOOLCHANGER_ASSET="${MAINSAIL_TOOLCHANGER_ASSET:-mainsail.zip}"
 GH_PROXY="${GH_PROXY:-}"
+SKIP_PLUGIN_INSTALL="${SKIP_PLUGIN_INSTALL:-0}"
 
 TMP_DIRS=""
 RED="\033[0;31m"
@@ -159,6 +160,16 @@ function current_script_dir {
 function run_plugin_installer {
     local script_dir installer tmp installer_url
 
+    if [ "${SKIP_PLUGIN_INSTALL}" = "1" ]; then
+        echo
+        echo "========================================="
+        echo "- 跳过 klipper-toolchange-stats 插件安装 -"
+        echo "========================================="
+        echo
+        echo "[SKIP] 插件安装已由 install.sh 完成。"
+        return
+    fi
+
     echo
     echo "========================================="
     echo "- 安装/更新 klipper-toolchange-stats 插件 -"
@@ -175,7 +186,7 @@ function run_plugin_installer {
     fi
 
     if [ -n "${installer}" ]; then
-        GH_PROXY="${GH_PROXY}" bash "${installer}" || die "执行插件安装脚本失败: ${installer}"
+        TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" bash "${installer}" || die "执行插件安装脚本失败: ${installer}"
         return
     fi
 
@@ -183,7 +194,7 @@ function run_plugin_installer {
     installer="${tmp}/install.sh"
     installer_url="${KLIPPER_STATS_REPO_RAW%/}/install.sh"
     download_url "${installer_url}" "${installer}"
-    GH_PROXY="${GH_PROXY}" bash "${installer}" || die "执行下载的插件安装脚本失败: ${installer_url}"
+    TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" bash "${installer}" || die "执行下载的插件安装脚本失败: ${installer_url}"
 }
 
 function check_existing_mainsail {
@@ -435,6 +446,7 @@ function main {
 GH_PROXY: ${GH_PROXY:-未启用}
 前端仓库: ${MAINSAIL_TOOLCHANGER_REPO}
 前端目录: ${MAINSAIL_PATH}
+插件安装: $([ "${SKIP_PLUGIN_INSTALL}" = "1" ] && printf "跳过" || printf "执行")
 
 EOF
 
