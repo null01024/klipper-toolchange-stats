@@ -150,7 +150,7 @@ class Multitool:
         # 所有可能冲突的命令名（gcode_handlers 是公共 dict）
         names = ['T%d' % i for i in range(self.tool_count)]
         names += [
-            'UNTOOL', 'CHANGE_TOOL', 'SET_TOOL_SPOOL_ID',
+            'UNTOOL', 'CHANGE_TOOL', 'SET_TOOL_SPOOL_ID', 'QUERY_TOOL_STATUS',
             'MULTITOOL_SET_TEMPERATURE', 'MULTITOOL_WAIT_TEMPERATURE',
         ]
         existing = self.gcode.gcode_handlers
