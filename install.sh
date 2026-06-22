@@ -833,11 +833,13 @@ function patch_multitool_hooks_for_cxchanger {
             print "[gcode_macro multitool_release_tool]"
             print "gcode:"
             print "    _release_tool TOOL={params.TOOL}"
+            print ""
         }
         function emit_pickup() {
             print "[gcode_macro multitool_pickup_tool]"
             print "gcode:"
             print "    _pickup_tool TOOL={params.TOOL}"
+            print ""
         }
         $0 == "[gcode_macro multitool_release_tool]" {
             emit_release()
@@ -849,7 +851,7 @@ function patch_multitool_hooks_for_cxchanger {
             skip = 1
             next
         }
-        skip && /^\[/ {
+        skip && (/^\[/ || /^#/) {
             skip = 0
         }
         !skip {
