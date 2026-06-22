@@ -248,6 +248,16 @@ extrude_compensation_speed: 1800
 - `rotation_distance`
 
 新安装时，脚本会按输入的热端数量生成对应数量的 `extruder` / `heater_fan` 模板。
+每个自动生成的 `extruder` 都会带默认 PID 占位值：
+
+```ini
+control: pid
+pid_kp: 26.213
+pid_ki: 1.304
+pid_kd: 131.721
+```
+
+这些值只是启动模板。实际使用前建议对每个热端执行 `PID_CALIBRATE`，然后把校准结果保存或填回对应 `extruder`。
 
 多热端复用挤出机时，`T1..Tn` 只需要温控字段，例如：
 
