@@ -379,40 +379,48 @@ EOF
 
 function emit_full_extruder_section {
     local tool="${1}"
-    local section stepper_label
+    local section stepper_label section_comment
     section="$(extruder_name "${tool}")"
     if [ "${tool}" -eq 0 ]; then
         stepper_label="T0"
+        section_comment="T0 的 Klipper extruder section；T0 名称固定为 extruder"
     else
         stepper_label="T${tool}"
+        section_comment="T${tool} 的 Klipper extruder section；名称为 extruder${tool}"
     fi
     cat <<EOF
+# ${section_comment}
 [${section}]
-step_pin: TODO_${stepper_label}_EXTRUDER_STEP_PIN
-dir_pin: TODO_${stepper_label}_EXTRUDER_DIR_PIN
-enable_pin: TODO_${stepper_label}_EXTRUDER_ENABLE_PIN
-microsteps: 32
-full_steps_per_rotation: 200
-rotation_distance: TODO_${stepper_label}_ROTATION_DISTANCE
-filament_diameter: 1.750
-heater_pin: TODO_T${tool}_HEATER_PIN
-nozzle_diameter: 0.400
-smooth_time: 0.4
-min_temp: 0
-max_temp: 300
-sensor_type: TODO_SENSOR_TYPE
-sensor_pin: TODO_T${tool}_SENSOR_PIN
-max_power: 0.9
-pressure_advance: 0.000
-max_extrude_only_distance: 400
-min_extrude_temp: 140
+step_pin: TODO_${stepper_label}_EXTRUDER_STEP_PIN   # 【必改】挤出机步进 STEP 引脚
+dir_pin: TODO_${stepper_label}_EXTRUDER_DIR_PIN     # 【必改】挤出机步进 DIR 引脚；方向相反时在引脚前加/去掉 !
+enable_pin: TODO_${stepper_label}_EXTRUDER_ENABLE_PIN # 【必改】挤出机步进 ENABLE 引脚；常见为 ! 开头
+microsteps: 32                                      # 挤出机细分；需与驱动配置一致
+full_steps_per_rotation: 200                        # 电机每圈整步数；1.8 度电机通常为 200
+rotation_distance: TODO_${stepper_label}_ROTATION_DISTANCE # 【必改】挤出机 rotation_distance，按实际挤出机构校准
+filament_diameter: 1.750                            # 耗材直径；常见 1.75mm 耗材填 1.750
+heater_pin: TODO_T${tool}_HEATER_PIN                # 【必改】T${tool} 加热棒 MOSFET 输出引脚
+nozzle_diameter: 0.400                              # 喷嘴直径；需与实际喷嘴和切片器一致
+smooth_time: 0.4                                    # 温度平滑时间；默认值通常可用
+min_temp: 0                                         # 允许的最低温度；热敏异常低于此值会报错
+max_temp: 300                                       # 允许的最高温度；按热端安全上限调整
+sensor_type: TODO_SENSOR_TYPE                       # 【必改】热敏类型，例如 Generic 3950 / PT1000 等
+sensor_pin: TODO_T${tool}_SENSOR_PIN                # 【必改】T${tool} 热敏输入引脚
+control: pid                                        # 默认使用 PID 控温；首次使用前建议执行 PID_CALIBRATE 重新校准
+pid_kp: 26.213                                      # 默认 PID Kp 占位值；PID 校准后替换为 SAVE_CONFIG 输出值
+pid_ki: 1.304                                       # 默认 PID Ki 占位值；PID 校准后替换为 SAVE_CONFIG 输出值
+pid_kd: 131.721                                     # 默认 PID Kd 占位值；PID 校准后替换为 SAVE_CONFIG 输出值
+max_power: 0.9                                      # 加热最大功率比例；0.9 表示最高 90%
+pressure_advance: 0.000                             # 压力提前；按耗材和挤出机校准，0 表示关闭
+max_extrude_only_distance: 400                      # 允许纯挤出最大长度；换料/排料动作可能需要较大值
+min_extrude_temp: 140                               # 低于该温度禁止挤出，防止冷挤出损坏挤出机
 
+# T${tool} 挤出机 TMC2209 驱动配置
 [tmc2209 ${section}]
-uart_pin: TODO_${stepper_label}_EXTRUDER_UART_PIN
-interpolate: False
-run_current: 0.85
-sense_resistor: 0.110
-stealthchop_threshold: 0
+uart_pin: TODO_${stepper_label}_EXTRUDER_UART_PIN   # 【必改】TMC UART 通讯引脚
+interpolate: False                                  # 是否启用 256 细分插值；高速挤出通常建议关闭
+run_current: 0.85                                   # 驱动运行电流，按电机额定电流和散热调整
+sense_resistor: 0.110                               # 驱动采样电阻；按驱动模块实际值填写
+stealthchop_threshold: 0                            # 0 表示挤出机使用 spreadCycle，通常更稳
 
 EOF
 }
@@ -420,16 +428,21 @@ EOF
 function emit_heater_only_extruder_section {
     local tool="${1}"
     cat <<EOF
+# T${tool} 仅温控热端；复用 T0 的物理挤出机步进
 [extruder${tool}]
-nozzle_diameter: 0.400
-filament_diameter: 1.750
-heater_pin: TODO_T${tool}_HEATER_PIN
-sensor_type: TODO_SENSOR_TYPE
-sensor_pin: TODO_T${tool}_SENSOR_PIN
-min_temp: 0
-max_temp: 300
-max_power: 0.9
-min_extrude_temp: 140
+nozzle_diameter: 0.400                              # 喷嘴直径；需与实际喷嘴和切片器一致
+filament_diameter: 1.750                            # 耗材直径；常见 1.75mm 耗材填 1.750
+heater_pin: TODO_T${tool}_HEATER_PIN                # 【必改】T${tool} 加热棒 MOSFET 输出引脚
+sensor_type: TODO_SENSOR_TYPE                       # 【必改】热敏类型，例如 Generic 3950 / PT1000 等
+sensor_pin: TODO_T${tool}_SENSOR_PIN                # 【必改】T${tool} 热敏输入引脚
+min_temp: 0                                         # 允许的最低温度；热敏异常低于此值会报错
+max_temp: 300                                       # 允许的最高温度；按热端安全上限调整
+control: pid                                        # 默认使用 PID 控温；首次使用前建议执行 PID_CALIBRATE 重新校准
+pid_kp: 26.213                                      # 默认 PID Kp 占位值；PID 校准后替换为 SAVE_CONFIG 输出值
+pid_ki: 1.304                                       # 默认 PID Ki 占位值；PID 校准后替换为 SAVE_CONFIG 输出值
+pid_kd: 131.721                                     # 默认 PID Kd 占位值；PID 校准后替换为 SAVE_CONFIG 输出值
+max_power: 0.9                                      # 加热最大功率比例；0.9 表示最高 90%
+min_extrude_temp: 140                               # 低于该温度禁止挤出；该热端无独立步进时仍用于温度安全判断
 
 EOF
 }
@@ -473,13 +486,15 @@ function generate_multihotend_config {
 # 重要：请先替换所有 TODO_* 占位，再重启 Klipper。
 #####################################################################
 
+# 多热端扩展板 MCU，名称固定为 multihotend
 [mcu multihotend]
-canbus_uuid: TODO_CANBUS_UUID
+canbus_uuid: TODO_CANBUS_UUID                       # 【必改】扩展板 CAN UUID，可用 ~/klippy-env/bin/python ~/klipper/scripts/canbus_query.py can0 查询
 
+# 为 multihotend MCU 定义引脚别名，便于后续引用
 [board_pins multihotend]
-mcu: multihotend
-aliases:
-    TODO_BOARD_PIN_ALIASES
+mcu: multihotend                                    # 这些别名属于上面的 [mcu multihotend]
+aliases:                                            # 【必改】在下一行填写别名，例如 T0H=PA0,T0S=PA1,IO0=PB0
+    TODO_BOARD_PIN_ALIASES                          # 【必改】替换为你的扩展板实际引脚别名列表
 
 #####################################################################
 # 风扇
@@ -488,48 +503,52 @@ EOF
 
         if [ "${dock_fan_mode}" = "shared" ]; then
             cat <<EOF
+# 共享停靠坞风扇，监听所有热端温度
 [heater_fan dock_fan]
-pin: TODO_DOCK_FAN_PIN
-max_power: 1.0
-kick_start_time: 0.5
-heater: ${heaters}
-heater_temp: 50
-fan_speed: 0.9
+pin: TODO_DOCK_FAN_PIN                              # 【必改】共享 dock_fan 的风扇输出引脚
+max_power: 1.0                                      # 风扇最大功率比例，1.0 表示 100%
+kick_start_time: 0.5                                # 风扇启动助推时间，防止低速不转
+heater: ${heaters}                                  # 监听的热端列表，任一热端超过阈值都会启动
+heater_temp: 50                                     # 热端超过 50°C 时启动风扇
+fan_speed: 0.9                                      # 风扇运行速度，0.9 表示 90%
 
 EOF
         else
             for ((i = 0; i < tool_count; i++)); do
                 name="$(extruder_name "${i}")"
                 cat <<EOF
+# T${i} 独立停靠坞风扇，只监听 ${name}
 [heater_fan dock_fan_t${i}]
-pin: TODO_DOCK_FAN_T${i}_PIN
-max_power: 1.0
-kick_start_time: 0.5
-heater: ${name}
-heater_temp: 50
-fan_speed: 0.9
+pin: TODO_DOCK_FAN_T${i}_PIN                        # 【必改】T${i} dock_fan 风扇输出引脚
+max_power: 1.0                                      # 风扇最大功率比例，1.0 表示 100%
+kick_start_time: 0.5                                # 风扇启动助推时间，防止低速不转
+heater: ${name}                                     # 只监听当前工具对应的热端
+heater_temp: 50                                     # 当前热端超过 50°C 时启动风扇
+fan_speed: 0.9                                      # 风扇运行速度，0.9 表示 90%
 
 EOF
             done
         fi
 
         cat <<EOF
+# 热端散热风扇，可共享监听所有热端
 [heater_fan hotend_fan]
-pin: TODO_HOTEND_FAN_PIN
-max_power: 1.0
-kick_start_time: 0.5
-heater: ${heaters}
-heater_temp: 50
-fan_speed: 1.0
+pin: TODO_HOTEND_FAN_PIN                            # 【必改】热端散热风扇输出引脚
+max_power: 1.0                                      # 风扇最大功率比例，1.0 表示 100%
+kick_start_time: 0.5                                # 风扇启动助推时间，防止低速不转
+heater: ${heaters}                                  # 监听的热端列表，任一热端超过阈值都会启动
+heater_temp: 50                                     # 热端超过 50°C 时启动风扇
+fan_speed: 1.0                                      # 热端散热风扇运行速度，1.0 表示 100%
 
 #####################################################################
 # multihotend MCU 温度
 #####################################################################
+# 显示 multihotend MCU 板载温度
 [temperature_sensor multihotend温度]
-sensor_type: temperature_mcu
-sensor_mcu: multihotend
-min_temp: 0
-max_temp: 100
+sensor_type: temperature_mcu                        # 使用 Klipper 内置 MCU 温度传感器
+sensor_mcu: multihotend                             # 读取 [mcu multihotend] 的 MCU 温度
+min_temp: 0                                         # MCU 最低安全温度
+max_temp: 100                                       # MCU 最高安全温度，超过会报错保护
 
 #####################################################################
 # 挤出机 / 热端
@@ -698,8 +717,8 @@ function patch_cxchanger_config_tool_count {
                 ykey = "variable_t" i "_dock_y"
                 xval = (xkey in values) ? values[xkey] : "0"
                 yval = (ykey in values) ? values[ykey] : "0"
-                printf "%s: %s\n", xkey, xval
-                printf "%s: %s\n", ykey, yval
+                printf "%s: %s               # 【必改】T%d 停靠坞中心 X 坐标\n", xkey, xval, i
+                printf "%s: %s               # 【必改】T%d 停靠坞中心 Y 坐标\n", ykey, yval, i
             }
         }
         NR == FNR {
