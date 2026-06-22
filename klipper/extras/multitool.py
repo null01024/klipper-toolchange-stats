@@ -55,7 +55,7 @@ class Multitool:
         self.extruder_motion_sync_stepper = config.get(
             'extruder_motion_sync_stepper', 'extruder').strip()
         self.default_pressure_advance_extruder = config.get(
-            'default_pressure_advance_extruder', '').strip()
+            'default_pressure_advance_extruder', 'extruder').strip()
         self.extrude_compensation_length = config.getfloat(
             'extrude_compensation_length', 0., minval=0.)
         self.extrude_compensation_speed = config.getfloat(

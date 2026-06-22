@@ -155,7 +155,7 @@ extrude_compensation_speed: 1800
 | `sync_active_extruder` | 换头后自动同步 Klipper active extruder，默认 `True` |
 | `sync_extruder_motion` | 是否执行 `SYNC_EXTRUDER_MOTION`。单物理 E 步进多热端设 `True`，独立多 E 步进多热端设 `False`，默认 `True` |
 | `extruder_motion_sync_stepper` | `sync_extruder_motion=True` 时要同步的共享 E 步进名，默认 `extruder` |
-| `default_pressure_advance_extruder` | 可选。设置后，未指定 `EXTRUDER=` 的 `SET_PRESSURE_ADVANCE` 会作用到该挤出步进，例如共用物理 E 步进时填 `extruder` |
+| `default_pressure_advance_extruder` | 未指定 `EXTRUDER=` 的 `SET_PRESSURE_ADVANCE` 会作用到该挤出步进，默认 `extruder` |
 | `extrude_compensation_length` | 自动回抽/挤出补偿共用长度，单位 mm，默认 `0` 关闭；释放旧工具前按负 E 回抽，抓取新工具并等温后按正 E 补偿，执行前检查对应 extruder 的 `min_extrude_temp` |
 | `extrude_compensation_speed` | 自动回抽/挤出补偿共用速度，单位 mm/min，默认 `1800` |
 
