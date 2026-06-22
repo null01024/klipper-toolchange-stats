@@ -87,6 +87,27 @@ cd ~/klipper-toolchange-stats
 bash install.sh
 ```
 
+安装脚本会询问：
+
+```text
+是否为新安装？新安装会生成 multitool/multihotend.cfg [y/N]:
+```
+
+默认 `n`，按升级处理：只更新插件、复制缺失的默认配置，并保留已有用户配置。输入 `y` 时会进入新安装流程：
+
+- 询问热端数量，生成 `~/printer_data/config/multitool/multihotend.cfg`。
+- 询问 `dock_fan` 模式：一个共享风扇监听所有 `extruder`，或每个 `extruder` 一个风扇。
+- 询问换头方案：
+  - `0) 自定义：自定义换头/换热端移动路径。`
+  - `1) CxChanger：https://github.com/cx330-TXY/CxChanger`
+- 选择自定义时，继续询问硬件模式：
+  - `多热端`：多个热端复用一个挤出机步进，`T1..Tn` 只生成温控配置。
+  - `多工具头`：每个工具头都有独立挤出机步进，每个 `extruder` 都生成 step/dir/enable 等配置。
+
+选择 CxChanger 时，安装脚本会按 `多热端` 模式生成配置，把 `schemes/CxChanger/change_tool.cfg` 复制到 `multitool/` 目录，并自动把 `multitool_config.cfg` 中的两个换头钩子改为调用 `_release_tool` / `_pickup_tool`。
+
+新生成的 `multihotend.cfg` 含有 `TODO_*` 占位，必须填写 CAN UUID、引脚、热敏类型、挤出机参数等硬件信息后再使用。若 `multihotend.cfg` 或 `change_tool.cfg` 已存在，安装脚本不会覆盖。
+
 ### 手动更新
 
 再次运行安装脚本会自动更新已有插件目录：脚本会在当前 Git 分支上执行 fast-forward 更新，然后重新软链 Klipper extras，并保留已存在的用户配置文件。
@@ -208,6 +229,23 @@ gcode:
 ```
 
 默认配置中的两个钩子会直接 `action_raise_error`，这是为了提醒你必须替换为真实动作。
+
+安装脚本新安装时可选择换头方案：
+
+- `自定义`：自定义换头/换热端移动路径，用户自己实现 `multitool_release_tool` 和 `multitool_pickup_tool`。
+- `CxChanger`：参考 [CxChanger](https://github.com/cx330-TXY/CxChanger) 的磁吸停靠坞路径模板。脚本会复制 `schemes/CxChanger/change_tool.cfg`，并把钩子自动改为：
+
+```cfg
+[gcode_macro multitool_release_tool]
+gcode:
+    _release_tool TOOL={params.TOOL}
+
+[gcode_macro multitool_pickup_tool]
+gcode:
+    _pickup_tool TOOL={params.TOOL}
+```
+
+使用 CxChanger 模板前，必须按机器实测修改 `change_tool.cfg` 中 `_multitool_cfg` 的各工具停靠坞坐标、避让距离和速度。
 
 钩子里只写机械运动，例如移动到坞口、进入坞位、横移、退出、等待运动队列清空等。不要在钩子里手动处理这些事项：
 
@@ -591,6 +629,9 @@ CALIBRATE_TOOL TOOL=0
 | 启动报 `以下命令已被其他 section 注册` | 删除旧的 `[gcode_macro T0..Tn]`、`[gcode_macro UNTOOL]`、`[gcode_macro CHANGE_TOOL]` |
 | 启动报 `[multitool]` 缺少 `tool_count` | 在 `[multitool]` 中填写 `tool_count` |
 | 执行 `T0` 时报钩子未实现 | 替换默认 `multitool_release_tool` / `multitool_pickup_tool` 中的 `action_raise_error` |
+| 新安装后启动报 `TODO_*` 或 pin 错误 | 填写 `multitool/multihotend.cfg` 中所有 `TODO_*` 占位 |
+| CxChanger 方案报 `Unknown command "_release_tool"` | 确认 `multitool/change_tool.cfg` 存在，且 `printer.cfg` 包含 `[include multitool/*.cfg]` |
+| CxChanger 换头坐标不对 | 修改 `change_tool.cfg` 中 `_multitool_cfg` 的 dock 坐标、避让距离和速度 |
 | 夹紧状态相反 | 调整 `[multitool_clamp] pin` 的 `!` 反相修饰符，目标是 `PRESSED = 已夹紧` |
 | 夹紧检测启动后状态未知 | buttons 只在电平变化时回调；检查接线和 pin 修饰符，必要时手动触发一次开关 |
 | XY 防撞检测不触发或误触发 | 检查 DIAG 接线、pin 反相修饰符，以及 TMC StallGuard 阈值（如 `driver_SGTHRS`） |
