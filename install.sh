@@ -15,6 +15,7 @@ GH_PROXY="${GH_PROXY:-}"
 FRESH_INSTALL=0
 TOOLCHANGE_SCHEME="custom"
 TOOL_HARDWARE_MODE=""
+FRESH_TOOL_COUNT=""
 INSTALL_MAINSAIL=0
 TOOLCHANGER_STACK_RUNNING="${TOOLCHANGER_STACK_RUNNING:-0}"
 
@@ -329,6 +330,15 @@ function extruder_list {
     printf "%s\n" "${out}"
 }
 
+function backup_file_once {
+    local file="${1}"
+    local suffix="${2}"
+    local backup="${file}.${suffix}"
+    if [ ! -f "${backup}" ]; then
+        cp "${file}" "${backup}" || die "备份文件失败: ${backup}"
+    fi
+}
+
 function ask_dock_fan_mode {
     local answer
     while true; do
@@ -429,6 +439,11 @@ function generate_multihotend_config {
     local target_file="${target_dir}/multihotend.cfg"
     local tool_count dock_fan_mode heaters i name
 
+    if [ -z "${FRESH_TOOL_COUNT}" ]; then
+        FRESH_TOOL_COUNT="$(prompt_int_default "请输入热端数量 [1-8，默认 4]: " 4 1 8)"
+    fi
+    tool_count="${FRESH_TOOL_COUNT}"
+
     if [ -f "${target_file}" ]; then
         echo "[CONFIG] multihotend.cfg 已存在，跳过生成（保留用户修改）"
         return
@@ -438,7 +453,6 @@ function generate_multihotend_config {
     mkdir -p "${target_dir}" || die "无法创建配置目录: ${target_dir}"
     [ -w "${target_dir}" ] || die "当前用户无权写入配置目录: ${target_dir}"
 
-    tool_count="$(prompt_int_default "请输入热端数量 [1-8，默认 4]: " 4 1 8)"
     if [ -z "${TOOL_HARDWARE_MODE}" ]; then
         TOOL_HARDWARE_MODE="$(ask_tool_hardware_mode)"
     fi
@@ -550,6 +564,216 @@ EOF
     echo "     请填写其中所有 TODO_* 字段后再使用。"
     if [ "${TOOL_HARDWARE_MODE}" = "multi_toolhead" ]; then
         echo "     多工具头模式请在 multitool_config.cfg 中确认 sync_extruder_motion: False。"
+    fi
+}
+
+function patch_multitool_config_tool_count {
+    local count="${1}"
+    local cfg="${CONFIG_PATH}/${CONFIG_SUBDIR}/multitool_config.cfg"
+    local tmp_cfg
+
+    [ -f "${cfg}" ] || {
+        echo "[CONFIG] 未找到 multitool_config.cfg，无法自动设置 tool_count。"
+        return
+    }
+
+    tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 multitool_config.cfg 临时文件失败。"
+    backup_file_once "${cfg}" "bak.toolcount"
+    local awk_status
+    if awk -v count="${count}" '
+        /^\[/ {
+            in_multitool = ($0 == "[multitool]")
+        }
+        in_multitool && /^[[:space:]]*tool_count[[:space:]]*:/ {
+            comment = ""
+            if (match($0, /[[:space:]]+#.*/)) {
+                comment = substr($0, RSTART)
+            }
+            print "tool_count: " count comment
+            changed = 1
+            next
+        }
+        { print }
+        END {
+            if (!changed) {
+                exit 2
+            }
+        }
+    ' "${cfg}" > "${tmp_cfg}"; then
+        awk_status=0
+    else
+        awk_status=$?
+    fi
+    case "${awk_status}" in
+        0)
+            mv "${tmp_cfg}" "${cfg}" || die "写入 multitool_config.cfg 失败: ${cfg}"
+            echo "[CONFIG] 已设置 multitool_config.cfg: tool_count=${count}"
+            ;;
+        2)
+            rm -f "${tmp_cfg}"
+            echo "[CONFIG] 未在 multitool_config.cfg 的 [multitool] 中找到 tool_count，请手动设置为 ${count}。"
+            ;;
+        *)
+            rm -f "${tmp_cfg}"
+            die "设置 multitool_config.cfg tool_count 失败。"
+            ;;
+    esac
+}
+
+function patch_calibration_tool_count {
+    local count="${1}"
+    local cfg="${CONFIG_PATH}/${CONFIG_SUBDIR}/calibration.cfg"
+    local tmp_cfg
+
+    [ -f "${cfg}" ] || {
+        echo "[CONFIG] 未找到 calibration.cfg，无法自动设置 variable_tool_count。"
+        return
+    }
+
+    tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 calibration.cfg 临时文件失败。"
+    backup_file_once "${cfg}" "bak.toolcount"
+    local awk_status
+    if awk -v count="${count}" '
+        /^\[/ {
+            in_vars = ($0 == "[gcode_macro _TOOL_CALIB_VARS]")
+        }
+        in_vars && /^[[:space:]]*variable_tool_count[[:space:]]*:/ {
+            comment = ""
+            if (match($0, /[[:space:]]+#.*/)) {
+                comment = substr($0, RSTART)
+            }
+            print "variable_tool_count: " count comment
+            changed = 1
+            next
+        }
+        { print }
+        END {
+            if (!changed) {
+                exit 2
+            }
+        }
+    ' "${cfg}" > "${tmp_cfg}"; then
+        awk_status=0
+    else
+        awk_status=$?
+    fi
+    case "${awk_status}" in
+        0)
+            mv "${tmp_cfg}" "${cfg}" || die "写入 calibration.cfg 失败: ${cfg}"
+            echo "[CONFIG] 已设置 calibration.cfg: variable_tool_count=${count}"
+            ;;
+        2)
+            rm -f "${tmp_cfg}"
+            echo "[CONFIG] 未在 calibration.cfg 的 _TOOL_CALIB_VARS 中找到 variable_tool_count，请手动设置为 ${count}。"
+            ;;
+        *)
+            rm -f "${tmp_cfg}"
+            die "设置 calibration.cfg variable_tool_count 失败。"
+            ;;
+    esac
+}
+
+function patch_cxchanger_config_tool_count {
+    local count="${1}"
+    local cfg="${CONFIG_PATH}/${CONFIG_SUBDIR}/change_tool.cfg"
+    local tmp_cfg
+
+    [ -f "${cfg}" ] || {
+        echo "[CONFIG] 未找到 change_tool.cfg，无法自动调整 CxChanger dock 坐标变量。"
+        return
+    }
+
+    tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 change_tool.cfg 临时文件失败。"
+    backup_file_once "${cfg}" "bak.toolcount"
+    local awk_status
+    if awk -v count="${count}" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function emit_docks(    i, xkey, ykey, xval, yval) {
+            for (i = 0; i < count; i++) {
+                xkey = "variable_t" i "_dock_x"
+                ykey = "variable_t" i "_dock_y"
+                xval = (xkey in values) ? values[xkey] : "0"
+                yval = (ykey in values) ? values[ykey] : "0"
+                printf "%s: %s\n", xkey, xval
+                printf "%s: %s\n", ykey, yval
+            }
+        }
+        NR == FNR {
+            if ($0 ~ /^[[:space:]]*variable_t[0-9]+_dock_[xy][[:space:]]*:/) {
+                line = $0
+                sub(/#.*/, "", line)
+                split(line, parts, ":")
+                key = trim(parts[1])
+                value = substr(line, index(line, ":") + 1)
+                values[key] = trim(value)
+            }
+            next
+        }
+        /^[[:space:]]*variable_t[0-9]+_dock_[xy][[:space:]]*:/ {
+            if (in_docks) {
+                next
+            }
+        }
+        /各热端停靠坞坐标/ {
+            print
+            in_docks = 1
+            emit_docks()
+            changed = 1
+            next
+        }
+        in_docks && /^[[:space:]]*$/ {
+            print
+            in_docks = 0
+            next
+        }
+        in_docks && /^[[:space:]]*gcode:/ {
+            print ""
+            print
+            in_docks = 0
+            next
+        }
+        !in_docks {
+            print
+        }
+        END {
+            if (!changed) {
+                exit 2
+            }
+        }
+    ' "${cfg}" "${cfg}" > "${tmp_cfg}"; then
+        awk_status=0
+    else
+        awk_status=$?
+    fi
+    case "${awk_status}" in
+        0)
+            mv "${tmp_cfg}" "${cfg}" || die "写入 change_tool.cfg 失败: ${cfg}"
+            echo "[CONFIG] 已调整 CxChanger change_tool.cfg dock 坐标变量数量为 ${count}"
+            ;;
+        2)
+            rm -f "${tmp_cfg}"
+            echo "[CONFIG] 未在 change_tool.cfg 中找到 CxChanger dock 坐标变量区域，请手动补齐 t0..t$((count - 1))。"
+            ;;
+        *)
+            rm -f "${tmp_cfg}"
+            die "调整 CxChanger change_tool.cfg dock 坐标变量失败。"
+            ;;
+    esac
+}
+
+function patch_fresh_install_tool_count_configs {
+    local count="${FRESH_TOOL_COUNT}"
+    if [ -z "${count}" ]; then
+        return
+    fi
+    patch_multitool_config_tool_count "${count}"
+    patch_calibration_tool_count "${count}"
+    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
+        patch_cxchanger_config_tool_count "${count}"
     fi
 }
 
@@ -704,6 +928,9 @@ if [ "${FRESH_INSTALL}" -eq 1 ]; then
     generate_multihotend_config
     if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
         install_cxchanger_config
+    fi
+    patch_fresh_install_tool_count_configs
+    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
         patch_multitool_hooks_for_cxchanger
     fi
 fi
