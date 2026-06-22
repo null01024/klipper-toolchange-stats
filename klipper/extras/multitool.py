@@ -24,6 +24,7 @@ import logging
 
 PERSIST_CURRENT_TOOL = 'current_tool'
 SPOOL_ID_VAR_TMPL = 'tool_%d_spool_id'
+DEFAULT_MIN_EXTRUDE_TEMP = 170.
 
 # 等温阈值：目标温度低于此值视为未加热/冷却中，跳过等温（单位 °C）
 HEAT_WAIT_MIN_TARGET = 50.
@@ -55,6 +56,14 @@ class Multitool:
             'extruder_motion_sync_stepper', 'extruder').strip()
         self.default_pressure_advance_extruder = config.get(
             'default_pressure_advance_extruder', '').strip()
+        self.extrude_compensation_length = config.getfloat(
+            'extrude_compensation_length', 0., minval=0.)
+        self.extrude_compensation_speed = config.getfloat(
+            'extrude_compensation_speed', 1800., above=0.)
+        self._min_extrude_temps = [
+            self._read_min_extrude_temp(config, i)
+            for i in range(self.tool_count)
+        ]
 
         # ---- 内存状态 ----
         self.current_tool = -1   # -1 表示无热端
@@ -250,6 +259,10 @@ class Multitool:
         for tool in range(self.tool_count):
             gcmd.respond_info(
                 "T%d Spoolman ID=%d" % (tool, self._spool_ids[tool]))
+        gcmd.respond_info(
+            "回抽/补偿: length=%.3fmm F%.0f"
+            % (self.extrude_compensation_length,
+               self.extrude_compensation_speed))
 
     def cmd_SET_TOOL_SPOOL_ID(self, gcmd):
         tool = gcmd.get_int('TOOL', minval=0, maxval=self.tool_count - 1)
@@ -356,6 +369,9 @@ class Multitool:
 
             # ---- 释放旧热端 ----
             if old_tool != -1:
+                self._extrude_tool(
+                    old_tool, -self.extrude_compensation_length,
+                    self.extrude_compensation_speed, '释放前回抽')
                 if stats is not None:
                     stats.stage_begin('release')
                 if xy_guard is not None:
@@ -405,6 +421,9 @@ class Multitool:
                 self._wait_heater(new_tool)
                 if stats is not None:
                     stats.stage_end('heat_wait')
+                self._extrude_tool(
+                    new_tool, self.extrude_compensation_length,
+                    self.extrude_compensation_speed, '抓取后挤出补偿')
 
             # 走到这里说明全流程无异常
             succeeded = True
@@ -493,6 +512,19 @@ class Multitool:
             "[multitool] 未指定 EXTRUDER 的 SET_PRESSURE_ADVANCE "
             "将作用于 %s" % target)
 
+    def _read_min_extrude_temp(self, config, tool):
+        section = self._tool_extruder_name(tool)
+        try:
+            if hasattr(config, 'has_section') and config.has_section(section):
+                return config.getsection(section).getfloat(
+                    'min_extrude_temp', DEFAULT_MIN_EXTRUDE_TEMP,
+                    minval=0.)
+        except Exception:
+            logging.exception(
+                "multitool: failed to read min_extrude_temp for %s",
+                section)
+        return DEFAULT_MIN_EXTRUDE_TEMP
+
     def _resolve_temperature_tool(
             self, requested, target, command, bypass_filament=False):
         if requested < 0 or requested >= self.tool_count:
@@ -533,6 +565,58 @@ class Multitool:
 
     def _tool_extruder_name(self, tool):
         return 'extruder' if tool == 0 else 'extruder%d' % tool
+
+    def _tool_temperature(self, tool, extruder):
+        eventtime = self.printer.get_reactor().monotonic()
+        try:
+            return float(extruder.get_status(eventtime).get('temperature'))
+        except Exception:
+            pass
+        try:
+            heater = extruder.get_heater()
+            return float(heater.get_status(eventtime).get('temperature'))
+        except Exception:
+            logging.exception(
+                "multitool: failed to read T%d temperature", tool)
+        return None
+
+    def _tool_can_extrude(self, tool, label):
+        if tool < 0 or tool >= self.tool_count:
+            return False
+        section = self._tool_extruder_name(tool)
+        extruder = self.printer.lookup_object(section, None)
+        if extruder is None:
+            self.gcode.respond_info(
+                "[multitool] %s 跳过：未找到 [%s] section。"
+                % (label, section))
+            return False
+        temp = self._tool_temperature(tool, extruder)
+        if temp is None:
+            self.gcode.respond_info(
+                "[multitool] %s 跳过：无法读取 T%d 当前温度。"
+                % (label, tool))
+            return False
+        min_temp = self._min_extrude_temps[tool]
+        if temp < min_temp:
+            self.gcode.respond_info(
+                "[multitool] %s 跳过：T%d 当前 %.1fC < min_extrude_temp %.1fC。"
+                % (label, tool, temp, min_temp))
+            return False
+        return True
+
+    def _extrude_tool(self, tool, distance, speed, label):
+        if distance == 0.:
+            return
+        if not self._tool_can_extrude(tool, label):
+            return
+        self._sync_active_extruder(tool)
+        self.gcode.respond_info(
+            "[multitool] %s: T%d E%.3f F%.0f"
+            % (label, tool, distance, speed))
+        self.gcode.run_script_from_command("M83")
+        self.gcode.run_script_from_command(
+            "G1 E%.5f F%.0f" % (distance, speed))
+        self.gcode.run_script_from_command("M400")
 
     def _heater_target(self, tool):
         if tool < 0 or tool >= self.tool_count:
@@ -672,6 +756,11 @@ class Multitool:
                 self.extruder_motion_sync_stepper,
             'default_pressure_advance_extruder':
                 self.default_pressure_advance_extruder,
+            'extrude_compensation_length':
+                self.extrude_compensation_length,
+            'extrude_compensation_speed':
+                self.extrude_compensation_speed,
+            'min_extrude_temps': list(self._min_extrude_temps),
         }
 
 

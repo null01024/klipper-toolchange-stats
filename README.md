@@ -138,6 +138,8 @@ sync_active_extruder: True
 sync_extruder_motion: True
 extruder_motion_sync_stepper: extruder
 default_pressure_advance_extruder: extruder
+extrude_compensation_length: 0.0
+extrude_compensation_speed: 1800
 ```
 
 字段说明：
@@ -154,6 +156,8 @@ default_pressure_advance_extruder: extruder
 | `sync_extruder_motion` | 是否执行 `SYNC_EXTRUDER_MOTION`。单物理 E 步进多热端设 `True`，独立多 E 步进多热端设 `False`，默认 `True` |
 | `extruder_motion_sync_stepper` | `sync_extruder_motion=True` 时要同步的共享 E 步进名，默认 `extruder` |
 | `default_pressure_advance_extruder` | 可选。设置后，未指定 `EXTRUDER=` 的 `SET_PRESSURE_ADVANCE` 会作用到该挤出步进，例如共用物理 E 步进时填 `extruder` |
+| `extrude_compensation_length` | 自动回抽/挤出补偿共用长度，单位 mm，默认 `0` 关闭；释放旧工具前按负 E 回抽，抓取新工具并等温后按正 E 补偿，执行前检查对应 extruder 的 `min_extrude_temp` |
+| `extrude_compensation_speed` | 自动回抽/挤出补偿共用速度，单位 mm/min，默认 `1800` |
 
 主模块会自动维护：
 
@@ -218,9 +222,13 @@ gcode:
 - 换头前保存 G-code 状态。
 - 切换到 `accel_swap`。
 - 抬升 `z_hop`。
+- 若配置了 `extrude_compensation_length`，释放旧工具前在温度达到该 extruder 的 `min_extrude_temp` 后自动回抽同等长度。
 - 调用释放和抓取钩子。
+- 若配置了 `extrude_compensation_length`，抓取新工具并等温后在温度达到该 extruder 的 `min_extrude_temp` 后自动挤出补偿同等长度。
 - 根据可选模块做夹紧检查、耗材检查、统计和偏移应用。
 - 恢复 G-code 状态和原加速度。
+
+自动回抽/补偿会临时使用相对挤出 (`M83`) 并依赖换头流程的 `RESTORE_GCODE_STATE` 恢复原始挤出模式；温度不足时只跳过该 E 动作，不中止换头。
 
 ### 3.4 偏移管理配置
 
@@ -445,7 +453,7 @@ multitool_filament_after_swap FROM=<旧> TO=<新>    # 可选
 RESUME
 ```
 
-`multitool_filament_before_swap` 和 `multitool_filament_after_swap` 都是可选宏。前者适合写换头前的额外动作，后者适合写换头后的上料、排废、prime 动作。框架已自动复制温度、等温、关闭旧热端，并在 `RESUME` 后重新应用新热端偏移。
+`multitool_filament_before_swap` 和 `multitool_filament_after_swap` 都是可选宏。前者适合写换头前的额外动作，后者适合写换头后的上料、排废、prime 动作。框架已自动复制温度、等温、关闭旧热端，并在 `RESUME` 后重新应用新热端偏移。若已启用 `[multitool] extrude_compensation_length`，请避免在 `multitool_filament_after_swap` 中再做重复过量挤出。
 
 `runout_continue_length` 用于消耗传感器到喷嘴之间的残余耗材。设置为 `50` 表示断料信号出现后，继续打印到挤出机净送料增加 50 mm，再触发暂停或续打。中途如果手动暂停、补料、换头或打印结束，延后续打会自动取消。
 
