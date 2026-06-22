@@ -271,7 +271,7 @@ sensor_pin: multihotend:T1S
 min_temp: 0
 max_temp: 300
 max_power: 0.9
-min_extrude_temp: 140
+min_extrude_temp: 170
 ```
 
 多工具头模式下，每个工具头都需要完整挤出机字段，例如：
@@ -292,7 +292,7 @@ sensor_pin: tool1:SENSOR
 min_temp: 0
 max_temp: 300
 max_power: 0.9
-min_extrude_temp: 140
+min_extrude_temp: 170
 ```
 
 ### 3. change_tool.cfg
