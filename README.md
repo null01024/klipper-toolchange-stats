@@ -87,6 +87,8 @@ bash install.sh
 - 进入新安装流程。
 - 生成 `multihotend.cfg`。
 - 可选择换头方案。
+- 输入的热端数量会自动同步到 `multitool_config.cfg` 和 `calibration.cfg`。
+- 如果选择 CxChanger，还会自动同步 `change_tool.cfg` 中 `t0..tN` 的 dock 坐标变量数量。
 
 随后会问：
 
@@ -126,6 +128,7 @@ bash install.sh
 - 使用 `schemes/CxChanger/change_tool.cfg` 模板。
 - 模板会复制到 `~/printer_data/config/multitool/change_tool.cfg`。
 - 安装脚本会自动把 `multitool_config.cfg` 的两个换头钩子改为调用 `_release_tool` / `_pickup_tool`。
+- 安装脚本会按输入的热端数量补齐或裁剪 `_multitool_cfg` 中的 `variable_tN_dock_x/y`。
 - CxChanger 固定按“多热端复用一个挤出机步进”的模式生成 `multihotend.cfg`。
 
 ### 硬件模式
@@ -214,7 +217,7 @@ extrude_compensation_speed: 1800
 
 常见修改：
 
-- `tool_count`：工具数量，4 热端就填 `4`。
+- `tool_count`：新安装时脚本会按输入的热端数量自动设置，后续改数量时需要同步修改。
 - `z_hop`：换头前抬 Z 高度。
 - `accel_swap`：换头过程临时加速度。
 - `sync_extruder_motion`：
@@ -243,6 +246,8 @@ extrude_compensation_speed: 1800
 - 挤出机 `step_pin` / `dir_pin` / `enable_pin`
 - 挤出机 `uart_pin`
 - `rotation_distance`
+
+新安装时，脚本会按输入的热端数量生成对应数量的 `extruder` / `heater_fan` 模板。
 
 多热端复用挤出机时，`T1..Tn` 只需要温控字段，例如：
 
