@@ -12,6 +12,9 @@ INSTALL_PATH="${INSTALL_PATH:-${HOME}/klipper-toolchange-stats}"
 CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
 REPO_URL="${REPO_URL:-https://github.com/null01024/klipper-toolchange-stats.git}"
 GH_PROXY="${GH_PROXY:-}"
+FRESH_INSTALL=0
+TOOLCHANGE_SCHEME="custom"
+TOOL_HARDWARE_MODE=""
 
 # 配置在 printer.cfg 中的 include 行（写在文件最顶部）
 INCLUDE_LINE="[include multitool/*.cfg]"
@@ -39,6 +42,71 @@ function require_command {
         fi
         die "未找到命令 ${cmd}，请先安装后重新运行。"
     fi
+}
+
+function read_answer {
+    local __var="${1}"
+    local __answer=""
+    if [ -r /dev/tty ]; then
+        if { read -r __answer < /dev/tty; } 2>/dev/null; then
+            printf -v "${__var}" "%s" "${__answer}"
+            return
+        fi
+    fi
+    if ! read -r __answer; then
+        __answer=""
+    fi
+    printf -v "${__var}" "%s" "${__answer}"
+}
+
+function ask_yes_no_default_no {
+    local prompt="${1}"
+    local answer
+    while true; do
+        printf "%s" "${prompt}"
+        read_answer answer
+        case "${answer}" in
+            ""|n|N) return 1 ;;
+            y|Y) return 0 ;;
+            *) echo "请输入 y 或 n。" ;;
+        esac
+    done
+}
+
+function prompt_int_default {
+    local prompt="${1}"
+    local default="${2}"
+    local min="${3}"
+    local max="${4}"
+    local answer
+    while true; do
+        printf "%s" "${prompt}" >&2
+        read_answer answer
+        if [ -z "${answer}" ]; then
+            answer="${default}"
+        fi
+        case "${answer}" in
+            *[!0-9]*|"")
+                echo "请输入 ${min}..${max} 之间的数字。" >&2
+                ;;
+            *)
+                if [ "${answer}" -ge "${min}" ] && [ "${answer}" -le "${max}" ]; then
+                    printf "%s\n" "${answer}"
+                    return
+                fi
+                echo "请输入 ${min}..${max} 之间的数字。" >&2
+                ;;
+        esac
+    done
+}
+
+function ask_fresh_install {
+    if ask_yes_no_default_no "是否为新安装？新安装会生成 multitool/multihotend.cfg [y/N]: "; then
+        FRESH_INSTALL=1
+    else
+        FRESH_INSTALL=0
+    fi
+    echo
 }
 
 function proxy_url {
@@ -222,6 +290,336 @@ function copy_config {
     done
 }
 
+function extruder_name {
+    local tool="${1}"
+    if [ "${tool}" -eq 0 ]; then
+        printf "extruder"
+    else
+        printf "extruder%d" "${tool}"
+    fi
+}
+
+function extruder_list {
+    local count="${1}"
+    local i name out
+    out=""
+    for ((i = 0; i < count; i++)); do
+        name="$(extruder_name "${i}")"
+        if [ -z "${out}" ]; then
+            out="${name}"
+        else
+            out="${out}, ${name}"
+        fi
+    done
+    printf "%s\n" "${out}"
+}
+
+function ask_dock_fan_mode {
+    local answer
+    while true; do
+        cat >&2 <<EOF
+请选择 dock_fan 模式：
+  1) 一个共享 dock_fan 监听所有 extruder（默认）
+  2) 每个 extruder 一个 dock_fan
+
+EOF
+        printf "请输入选项 [1/2，默认 1]: " >&2
+        read_answer answer
+        case "${answer}" in
+            ""|1) printf "shared\n"; return ;;
+            2) printf "per_tool\n"; return ;;
+            *) echo "输入无效，请输入 1 或 2。" >&2 ;;
+        esac
+    done
+}
+
+function ask_tool_hardware_mode {
+    local answer
+    while true; do
+        cat >&2 <<EOF
+请选择硬件模式：
+  1) 多热端：多个热端复用一个挤出机步进（默认）
+  2) 多工具头：每个工具头都有独立挤出机步进
+
+EOF
+        printf "请输入选项 [1/2，默认 1]: " >&2
+        read_answer answer
+        case "${answer}" in
+            ""|1) printf "shared_extruder\n"; return ;;
+            2) printf "multi_toolhead\n"; return ;;
+            *) echo "输入无效，请输入 1 或 2。" >&2 ;;
+        esac
+    done
+}
+
+function emit_full_extruder_section {
+    local tool="${1}"
+    local section stepper_label
+    section="$(extruder_name "${tool}")"
+    if [ "${tool}" -eq 0 ]; then
+        stepper_label="T0"
+    else
+        stepper_label="T${tool}"
+    fi
+    cat <<EOF
+[${section}]
+step_pin: TODO_${stepper_label}_EXTRUDER_STEP_PIN
+dir_pin: TODO_${stepper_label}_EXTRUDER_DIR_PIN
+enable_pin: TODO_${stepper_label}_EXTRUDER_ENABLE_PIN
+microsteps: 32
+full_steps_per_rotation: 200
+rotation_distance: TODO_${stepper_label}_ROTATION_DISTANCE
+filament_diameter: 1.750
+heater_pin: TODO_T${tool}_HEATER_PIN
+nozzle_diameter: 0.400
+smooth_time: 0.4
+min_temp: 0
+max_temp: 300
+sensor_type: TODO_SENSOR_TYPE
+sensor_pin: TODO_T${tool}_SENSOR_PIN
+max_power: 0.9
+pressure_advance: 0.000
+max_extrude_only_distance: 400
+min_extrude_temp: 140
+
+[tmc2209 ${section}]
+uart_pin: TODO_${stepper_label}_EXTRUDER_UART_PIN
+interpolate: False
+run_current: 0.85
+sense_resistor: 0.110
+stealthchop_threshold: 0
+
+EOF
+}
+
+function emit_heater_only_extruder_section {
+    local tool="${1}"
+    cat <<EOF
+[extruder${tool}]
+nozzle_diameter: 0.400
+filament_diameter: 1.750
+heater_pin: TODO_T${tool}_HEATER_PIN
+sensor_type: TODO_SENSOR_TYPE
+sensor_pin: TODO_T${tool}_SENSOR_PIN
+min_temp: 0
+max_temp: 300
+max_power: 0.9
+min_extrude_temp: 140
+
+EOF
+}
+
+function generate_multihotend_config {
+    local target_dir="${CONFIG_PATH}/${CONFIG_SUBDIR}"
+    local target_file="${target_dir}/multihotend.cfg"
+    local tool_count dock_fan_mode heaters i name
+
+    if [ -f "${target_file}" ]; then
+        echo "[CONFIG] multihotend.cfg 已存在，跳过生成（保留用户修改）"
+        return
+    fi
+
+    echo "[CONFIG] 新安装：生成 multihotend.cfg"
+    mkdir -p "${target_dir}" || die "无法创建配置目录: ${target_dir}"
+    [ -w "${target_dir}" ] || die "当前用户无权写入配置目录: ${target_dir}"
+
+    tool_count="$(prompt_int_default "请输入热端数量 [1-8，默认 4]: " 4 1 8)"
+    if [ -z "${TOOL_HARDWARE_MODE}" ]; then
+        TOOL_HARDWARE_MODE="$(ask_tool_hardware_mode)"
+    fi
+    dock_fan_mode="$(ask_dock_fan_mode)"
+    heaters="$(extruder_list "${tool_count}")"
+
+    {
+        cat <<EOF
+#####################################################################
+# Multihotend 配置模板
+#
+# 此文件由 install.sh 在新安装模式下生成。
+# 重要：请先替换所有 TODO_* 占位，再重启 Klipper。
+#####################################################################
+
+[mcu multihotend]
+canbus_uuid: TODO_CANBUS_UUID
+
+[board_pins multihotend]
+mcu: multihotend
+aliases:
+    TODO_BOARD_PIN_ALIASES
+
+#####################################################################
+# 风扇
+#####################################################################
+EOF
+
+        if [ "${dock_fan_mode}" = "shared" ]; then
+            cat <<EOF
+[heater_fan dock_fan]
+pin: TODO_DOCK_FAN_PIN
+max_power: 1.0
+kick_start_time: 0.5
+heater: ${heaters}
+heater_temp: 50
+fan_speed: 0.9
+
+EOF
+        else
+            for ((i = 0; i < tool_count; i++)); do
+                name="$(extruder_name "${i}")"
+                cat <<EOF
+[heater_fan dock_fan_t${i}]
+pin: TODO_DOCK_FAN_T${i}_PIN
+max_power: 1.0
+kick_start_time: 0.5
+heater: ${name}
+heater_temp: 50
+fan_speed: 0.9
+
+EOF
+            done
+        fi
+
+        cat <<EOF
+[heater_fan hotend_fan]
+pin: TODO_HOTEND_FAN_PIN
+max_power: 1.0
+kick_start_time: 0.5
+heater: ${heaters}
+heater_temp: 50
+fan_speed: 1.0
+
+#####################################################################
+# multihotend MCU 温度
+#####################################################################
+[temperature_sensor multihotend温度]
+sensor_type: temperature_mcu
+sensor_mcu: multihotend
+min_temp: 0
+max_temp: 100
+
+#####################################################################
+# 挤出机 / 热端
+#####################################################################
+EOF
+
+        if [ "${TOOL_HARDWARE_MODE}" = "multi_toolhead" ]; then
+            cat <<EOF
+#####################################################################
+# 多工具头模式：每个工具头都有独立挤出机步进
+#####################################################################
+EOF
+
+            for ((i = 0; i < tool_count; i++)); do
+                emit_full_extruder_section "${i}"
+            done
+        else
+            cat <<EOF
+#####################################################################
+# 多热端模式：T0 使用物理挤出机，T1..Tn 仅做温度管理
+#####################################################################
+EOF
+
+            emit_full_extruder_section 0
+            for ((i = 1; i < tool_count; i++)); do
+                emit_heater_only_extruder_section "${i}"
+            done
+        fi
+    } > "${target_file}" || die "生成 multihotend.cfg 失败: ${target_file}"
+
+    echo "  -> 已生成 multihotend.cfg"
+    echo "     请填写其中所有 TODO_* 字段后再使用。"
+    if [ "${TOOL_HARDWARE_MODE}" = "multi_toolhead" ]; then
+        echo "     多工具头模式请在 multitool_config.cfg 中确认 sync_extruder_motion: False。"
+    fi
+}
+
+function ask_toolchange_scheme {
+    local answer
+    while true; do
+        cat <<EOF
+请选择换头方案：
+  0) 自定义：自定义换头/换热端移动路径。
+  1) CxChanger：https://github.com/cx330-TXY/CxChanger
+
+EOF
+        printf "请输入 0 或 1 [默认 0]: "
+        read_answer answer
+        case "${answer}" in
+            ""|0) TOOLCHANGE_SCHEME="custom"; return ;;
+            1) TOOLCHANGE_SCHEME="cxchanger"; return ;;
+            *) echo "输入无效，请输入 0 或 1。" ;;
+        esac
+    done
+}
+
+function install_cxchanger_config {
+    local target_dir="${CONFIG_PATH}/${CONFIG_SUBDIR}"
+    local target_file="${target_dir}/change_tool.cfg"
+    local source_file="${INSTALL_PATH}/schemes/CxChanger/change_tool.cfg"
+
+    [ -f "${source_file}" ] || die "缺少 CxChanger 换头模板: ${source_file}"
+    if [ -f "${target_file}" ]; then
+        echo "[CONFIG] change_tool.cfg 已存在，跳过复制（保留用户修改）"
+        return
+    fi
+    cp "${source_file}" "${target_file}" || die "复制 change_tool.cfg 失败: ${source_file} -> ${target_file}"
+    echo "[CONFIG] 已复制 CxChanger change_tool.cfg"
+}
+
+function patch_multitool_hooks_for_cxchanger {
+    local cfg="${CONFIG_PATH}/${CONFIG_SUBDIR}/multitool_config.cfg"
+    local backup="${cfg}.bak.cxchanger"
+    local tmp_cfg
+
+    if [ ! -f "${cfg}" ]; then
+        echo "[CONFIG] 未找到 multitool_config.cfg，无法自动调整 CxChanger 钩子。"
+        return
+    fi
+    if ! grep -q '^\[gcode_macro multitool_release_tool\]$' "${cfg}" \
+            || ! grep -q '^\[gcode_macro multitool_pickup_tool\]$' "${cfg}"; then
+        echo "[CONFIG] 未找到 multitool_release_tool / multitool_pickup_tool 宏，无法自动调整。"
+        echo "         请手动添加 _release_tool / _pickup_tool 转发钩子。"
+        return
+    fi
+
+    tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 multitool_config.cfg 临时文件失败。"
+    cp "${cfg}" "${backup}" || die "备份 multitool_config.cfg 失败: ${backup}"
+    awk '
+        function emit_release() {
+            print "[gcode_macro multitool_release_tool]"
+            print "gcode:"
+            print "    _release_tool TOOL={params.TOOL}"
+        }
+        function emit_pickup() {
+            print "[gcode_macro multitool_pickup_tool]"
+            print "gcode:"
+            print "    _pickup_tool TOOL={params.TOOL}"
+        }
+        $0 == "[gcode_macro multitool_release_tool]" {
+            emit_release()
+            skip = 1
+            next
+        }
+        $0 == "[gcode_macro multitool_pickup_tool]" {
+            emit_pickup()
+            skip = 1
+            next
+        }
+        skip && /^\[/ {
+            skip = 0
+        }
+        !skip {
+            print
+        }
+    ' "${cfg}" > "${tmp_cfg}" || {
+        rm -f "${tmp_cfg}"
+        die "调整 CxChanger 钩子失败。"
+    }
+    mv "${tmp_cfg}" "${cfg}" || die "写入 multitool_config.cfg 失败: ${cfg}"
+    echo "[CONFIG] 已将 multitool_config.cfg 钩子调整为 CxChanger 方案"
+    echo "         备份文件: ${backup}"
+}
+
 function patch_printer_cfg {
     local printer_cfg="${CONFIG_PATH}/printer.cfg"
 
@@ -261,10 +659,22 @@ echo "- Klipper multitool-stats 安装/更新脚本 -"
 printf "=========================================\n\n"
 
 preflight_checks
+ask_fresh_install
 sync_repo
 link_extension
 clean_orphan_links
 copy_config
+if [ "${FRESH_INSTALL}" -eq 1 ]; then
+    ask_toolchange_scheme
+    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
+        TOOL_HARDWARE_MODE="shared_extruder"
+    fi
+    generate_multihotend_config
+    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
+        install_cxchanger_config
+        patch_multitool_hooks_for_cxchanger
+    fi
+fi
 patch_printer_cfg
 restart_klipper
 
@@ -280,7 +690,30 @@ printer.cfg 顶部已自动加入：
     ${INCLUDE_LINE}
 
 下一步：
-    请查看 README 完成配置：
+    1. 修改 ${CONFIG_PATH}/${CONFIG_SUBDIR}/multitool_config.cfg
+       - 确认 [multitool] tool_count / z_hop / accel_swap 等参数
+       - 多热端复用挤出机：保持 sync_extruder_motion: True
+       - 多工具头独立挤出机：设置 sync_extruder_motion: False
+       - 自定义方案：实现 multitool_release_tool / multitool_pickup_tool
+       - CxChanger 方案：确认钩子已转发到 _release_tool / _pickup_tool
+
+    2. 如果本次新生成了 multihotend.cfg，必须填写所有 TODO_*：
+       - canbus_uuid
+       - board_pins aliases
+       - heater_pin / sensor_pin
+       - fan pin
+       - extruder step/dir/enable/uart pin
+       - rotation_distance / sensor_type 等挤出机参数
+
+    3. 如果使用 CxChanger，请修改 ${CONFIG_PATH}/${CONFIG_SUBDIR}/change_tool.cfg
+       - 每个工具的 dock_x / dock_y
+       - dock_shift_x / dock_dodge_y / dock_safe_y
+       - feed_safe / feed_fast / feed_slow
+
+    4. 检查 printer.cfg 或其它主配置
+       - 确认包含：${INCLUDE_LINE}
+
+    更多配置说明请查看 README：
     https://github.com/null01024/klipper-toolchange-stats#readme
 
 可选: 在 moonraker.conf 中添加 update_manager 以支持 OTA 更新：
