@@ -210,6 +210,7 @@ z_hop: 0.4
 feed_z: 600
 accel_swap: 8000
 untool_safe_z: 10
+untool_unhomed_prepare: True
 sync_active_spool: True
 sync_active_extruder: True
 sync_extruder_motion: True
@@ -224,6 +225,7 @@ extrude_compensation_speed: 1800
 - `tool_count`：新安装时脚本会按输入的热端数量自动设置，后续改数量时需要同步修改。
 - `z_hop`：换头前抬 Z 高度。
 - `accel_swap`：换头过程临时加速度。
+- `untool_unhomed_prepare`：`UNTOOL` 时若 XYZ 任意轴未归位，先归位缺失的 XY 轴，再临时 `SET_KINEMATIC_POSITION Z=0` 并抬升 Z 10mm 后卸下工具。此功能需要 Klipper 启用 `[force_move] enable_force_move: True`。
 - `sync_extruder_motion`：
   - 多热端复用一个挤出机步进：`True`
   - 多工具头独立挤出机：`False`
