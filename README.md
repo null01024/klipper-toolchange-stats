@@ -422,6 +422,8 @@ CHECK_PRINT_FILAMENT TOOLS={tools}
 
 ## Spoolman 料盘映射
 
+使用料盘映射前，需要先安装并配置 [Spoolman](https://github.com/Donkie/Spoolman)。
+
 可以为每个工具通道绑定 Spoolman 料盘：
 
 ```gcode
