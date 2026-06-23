@@ -47,6 +47,8 @@ class Multitool:
             'accel_swap', 8000., above=0.)
         self.untool_safe_z = config.getfloat(
             'untool_safe_z', 10., minval=0.)
+        self.untool_unhomed_prepare = config.getboolean(
+            'untool_unhomed_prepare', True)
         self.sync_active_spool = config.getboolean('sync_active_spool', True)
         self.sync_active_extruder = config.getboolean(
             'sync_active_extruder', True)
@@ -210,6 +212,11 @@ class Multitool:
     # 命令实现
     # ------------------------------------------------------------------
     def cmd_UNTOOL(self, gcmd):
+        if (self.untool_unhomed_prepare
+                and self.current_tool != -1
+                and self._needs_unhomed_untool()):
+            self._do_unhomed_untool(gcmd)
+            return
         self._do_change_tool(gcmd, -1)
 
     def cmd_CHANGE_TOOL(self, gcmd):
@@ -452,6 +459,38 @@ class Multitool:
         # ---- 偏移应用 (在异常路径下不需要) ----
         if new_tool != -1 and offsets is not None:
             offsets.apply(new_tool, base_tool=self.base_tool)
+
+    def _needs_unhomed_untool(self):
+        toolhead = self.printer.lookup_object('toolhead')
+        return not self._toolhead_homed(toolhead, 'xyz')
+
+    def _do_unhomed_untool(self, gcmd):
+        self._prepare_unhomed_untool()
+        self._do_change_tool(gcmd, -1)
+
+    def _toolhead_homed(self, toolhead, axes):
+        eventtime = self.printer.get_reactor().monotonic()
+        homed = toolhead.get_status(eventtime).get('homed_axes', '')
+        return all(axis in homed for axis in axes)
+
+    def _toolhead_homed_axes(self):
+        toolhead = self.printer.lookup_object('toolhead')
+        eventtime = self.printer.get_reactor().monotonic()
+        return toolhead.get_status(eventtime).get('homed_axes', '')
+
+    def _prepare_unhomed_untool(self):
+        homed = self._toolhead_homed_axes()
+        axes_to_home = [axis.upper() for axis in 'xy' if axis not in homed]
+        self.gcode.respond_info(
+            "[multitool] UNTOOL 时 XYZ 未全部归位：先归位缺失的 XY 轴，"
+            "再临时设置 Z=0 并抬升 10mm。")
+        if axes_to_home:
+            self.gcode.run_script_from_command(
+                "G28 %s" % ' '.join(axes_to_home))
+        self.gcode.run_script_from_command("SET_KINEMATIC_POSITION Z=0")
+        self.gcode.run_script_from_command("G91")
+        self.gcode.run_script_from_command("G0 Z10.000 F%d" % self.feed_z)
+        self.gcode.run_script_from_command("G90")
 
     # ------------------------------------------------------------------
     # 内部：状态写入 + 落盘
