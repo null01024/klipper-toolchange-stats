@@ -124,7 +124,7 @@ function ask_frontend_choice {
   0. 不安装/更新前端
   1. Fluidd
   2. Mainsail（维护可能不及时）
-请输入 0..2 [0]: 
+请输入 0,1,2 [0]: 
 EOF
         read_answer answer
         if [ -z "${answer}" ]; then
