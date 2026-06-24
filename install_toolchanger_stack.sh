@@ -135,19 +135,6 @@ function pretty_home_path {
     esac
 }
 
-function unique_backup_path {
-    local base="${1}"
-    local candidate stamp index
-    stamp="$(date +%Y%m%d-%H%M%S)"
-    candidate="${base}.backup.${stamp}"
-    index=1
-    while [ -e "${candidate}" ]; do
-        candidate="${base}.backup.${stamp}.${index}"
-        index=$((index + 1))
-    done
-    printf "%s\n" "${candidate}"
-}
-
 function current_script_dir {
     local source="${BASH_SOURCE:-}"
     if [ -n "${source}" ] && [ -f "${source}" ]; then
@@ -238,7 +225,7 @@ function find_release_root {
 
 function install_or_update_mainsail_toolchanger {
     local tmp zip extract staged release_root release_url
-    local old_config backup target_parent
+    local old_config target_parent
 
     echo
     echo "========================================="
@@ -267,30 +254,24 @@ function install_or_update_mainsail_toolchanger {
     old_config=""
     if [ -f "${MAINSAIL_PATH}/config.json" ]; then
         old_config="${tmp}/config.json"
-        cp "${MAINSAIL_PATH}/config.json" "${old_config}" || die "备份现有 config.json 失败: ${MAINSAIL_PATH}/config.json"
+        cp "${MAINSAIL_PATH}/config.json" "${old_config}" || die "复制现有 config.json 失败: ${MAINSAIL_PATH}/config.json"
         cp "${old_config}" "${staged}/config.json" || die "保留 config.json 到新前端目录失败。"
         echo "[CONFIG] 已保留现有 config.json"
     fi
 
     [ -f "${staged}/index.html" ] || die "解压后的前端目录缺少 index.html，已中止。"
 
-    backup=""
     target_parent="$(dirname "${MAINSAIL_PATH}")"
     mkdir -p "${target_parent}" || die "无法创建前端父目录: ${target_parent}"
     [ -w "${target_parent}" ] || die "当前用户无权写入前端父目录: ${target_parent}"
 
     if [ -e "${MAINSAIL_PATH}" ] || [ -L "${MAINSAIL_PATH}" ]; then
-        backup="$(unique_backup_path "${MAINSAIL_PATH}")"
-        echo "[BACKUP] 备份现有前端目录到 ${backup}"
-        mv "${MAINSAIL_PATH}" "${backup}" || die "备份现有前端目录失败: ${MAINSAIL_PATH} -> ${backup}"
+        echo "[INSTALL] 移除现有前端目录 ${MAINSAIL_PATH}"
+        rm -rf -- "${MAINSAIL_PATH}" || die "移除现有前端目录失败: ${MAINSAIL_PATH}"
     fi
 
     echo "[INSTALL] 部署前端到 ${MAINSAIL_PATH}"
     if ! mv "${staged}" "${MAINSAIL_PATH}"; then
-        if [ -n "${backup}" ] && [ -e "${backup}" ]; then
-            echo "[ROLLBACK] 部署失败，恢复 ${MAINSAIL_PATH}"
-            mv "${backup}" "${MAINSAIL_PATH}" || die "部署失败，且回滚也失败。请手动恢复备份: ${backup}"
-        fi
         die "部署 mainsail-toolchanger 失败: ${MAINSAIL_PATH}"
     fi
 
@@ -359,7 +340,7 @@ function append_update_manager_sections {
 }
 
 function patch_moonraker_conf {
-    local conf tmp tmp1 tmp2 backup changed
+    local conf tmp tmp1 tmp2 changed
 
     echo
     echo "========================================="
@@ -411,19 +392,13 @@ function patch_moonraker_conf {
         return
     fi
 
-    backup="${conf}.bak.toolchanger.$(date +%Y%m%d-%H%M%S)"
-    if ! cp "${conf}" "${backup}"; then
-        warn "备份 moonraker.conf 失败，已跳过 Moonraker 自动配置: ${backup}"
-        return
-    fi
     if ! cp "${tmp2}" "${conf}"; then
-        warn "写入 moonraker.conf 失败，已保留备份: ${backup}"
+        warn "写入 moonraker.conf 失败。"
         return
     fi
     rm -f "${tmp1}" "${tmp2}" || warn "清理 Moonraker 临时文件失败: ${tmp}"
 
     echo "[MOONRAKER] 已更新 ${conf}"
-    echo "            备份文件: ${backup}"
 
     changed=1
     if [ "${changed}" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then

@@ -330,15 +330,6 @@ function extruder_list {
     printf "%s\n" "${out}"
 }
 
-function backup_file_once {
-    local file="${1}"
-    local suffix="${2}"
-    local backup="${file}.${suffix}"
-    if [ ! -f "${backup}" ]; then
-        cp "${file}" "${backup}" || die "备份文件失败: ${backup}"
-    fi
-}
-
 function ask_dock_fan_mode {
     local answer
     while true; do
@@ -597,7 +588,6 @@ function patch_multitool_config_tool_count {
     }
 
     tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 multitool_config.cfg 临时文件失败。"
-    backup_file_once "${cfg}" "bak.toolcount"
     local awk_status
     if awk -v count="${count}" '
         /^\[/ {
@@ -650,7 +640,6 @@ function patch_calibration_tool_count {
     }
 
     tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 calibration.cfg 临时文件失败。"
-    backup_file_once "${cfg}" "bak.toolcount"
     local awk_status
     if awk -v count="${count}" '
         /^\[/ {
@@ -703,7 +692,6 @@ function patch_cxchanger_config_tool_count {
     }
 
     tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 change_tool.cfg 临时文件失败。"
-    backup_file_once "${cfg}" "bak.toolcount"
     local awk_status
     if awk -v count="${count}" '
         function trim(s) {
@@ -831,7 +819,6 @@ function install_cxchanger_config {
 
 function patch_multitool_hooks_for_cxchanger {
     local cfg="${CONFIG_PATH}/${CONFIG_SUBDIR}/multitool_config.cfg"
-    local backup="${cfg}.bak.cxchanger"
     local tmp_cfg
 
     if [ ! -f "${cfg}" ]; then
@@ -846,7 +833,6 @@ function patch_multitool_hooks_for_cxchanger {
     fi
 
     tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 multitool_config.cfg 临时文件失败。"
-    cp "${cfg}" "${backup}" || die "备份 multitool_config.cfg 失败: ${backup}"
     awk '
         function emit_release() {
             print "[gcode_macro multitool_release_tool]"
@@ -882,7 +868,6 @@ function patch_multitool_hooks_for_cxchanger {
     }
     mv "${tmp_cfg}" "${cfg}" || die "写入 multitool_config.cfg 失败: ${cfg}"
     echo "[CONFIG] 已将 multitool_config.cfg 钩子调整为 CxChanger 方案"
-    echo "         备份文件: ${backup}"
 }
 
 function patch_printer_cfg {
@@ -902,16 +887,15 @@ function patch_printer_cfg {
     echo "[CONFIG] 在 printer.cfg 顶部插入：${INCLUDE_LINE}"
     local tmp_cfg
     tmp_cfg="$(mktemp "${printer_cfg}.tmp.XXXXXX")" || die "创建 printer.cfg 临时文件失败。"
-    cp "${printer_cfg}" "${printer_cfg}.bak.multitool" || die "备份 printer.cfg 失败: ${printer_cfg}.bak.multitool"
     if ! {
         printf "%s\n\n" "${INCLUDE_LINE}"
-        cat "${printer_cfg}.bak.multitool"
+        cat "${printer_cfg}"
     } > "${tmp_cfg}"; then
         rm -f "${tmp_cfg}"
         die "生成新的 printer.cfg 失败。"
     fi
     mv "${tmp_cfg}" "${printer_cfg}" || die "写入 printer.cfg 失败: ${printer_cfg}"
-    echo "  -> 已备份原文件到 printer.cfg.bak.multitool"
+    echo "  -> 已更新 printer.cfg"
 }
 
 function restart_klipper {
