@@ -10,7 +10,7 @@
 # Local:
 #   bash ~/klipper-toolchange-stats/install_toolchanger_stack.sh
 #
-# Re-run this script to update both the Klipper plugin and the Mainsail fork.
+# Re-run this script to update both the Klipper plugin and the Fluidd fork.
 
 set -euo pipefail
 export LC_ALL=C
@@ -18,9 +18,9 @@ export LC_ALL=C
 KLIPPER_STATS_REPO_RAW="${KLIPPER_STATS_REPO_RAW:-https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main}"
 INSTALL_PATH="${INSTALL_PATH:-${HOME}/klipper-toolchange-stats}"
 CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
-MAINSAIL_PATH="${MAINSAIL_PATH:-${HOME}/mainsail}"
-MAINSAIL_TOOLCHANGER_REPO="${MAINSAIL_TOOLCHANGER_REPO:-null01024/mainsail-toolchanger}"
-MAINSAIL_TOOLCHANGER_ASSET="${MAINSAIL_TOOLCHANGER_ASSET:-mainsail.zip}"
+FLUIDD_PATH="${FLUIDD_PATH:-${MAINSAIL_PATH:-${HOME}/fluidd}}"
+FLUIDD_TOOLCHANGER_REPO="${FLUIDD_TOOLCHANGER_REPO:-${MAINSAIL_TOOLCHANGER_REPO:-null01024/fluidd-toolchanger}}"
+FLUIDD_TOOLCHANGER_ASSET="${FLUIDD_TOOLCHANGER_ASSET:-${MAINSAIL_TOOLCHANGER_ASSET:-fluidd.zip}}"
 GH_PROXY="${GH_PROXY:-}"
 SKIP_PLUGIN_INSTALL="${SKIP_PLUGIN_INSTALL:-0}"
 
@@ -184,18 +184,18 @@ function run_plugin_installer {
     TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" bash "${installer}" || die "执行下载的插件安装脚本失败: ${installer_url}"
 }
 
-function check_existing_mainsail {
+function check_existing_fluidd {
     echo
     echo "========================================="
-    echo "- 检查原版 Mainsail 前端 -"
+    echo "- 检查原版 Fluidd 前端 -"
     echo "========================================="
     echo
 
-    if [ ! -d "${MAINSAIL_PATH}" ] || [ ! -f "${MAINSAIL_PATH}/index.html" ]; then
-        die "未检测到原版 Mainsail 前端: ${MAINSAIL_PATH}。请先通过 KIAUH 安装原版 Mainsail 前端后，再重新运行本脚本。原版安装教程: https://docs.mainsail.xyz/setup/kiauh/"
+    if [ ! -d "${FLUIDD_PATH}" ] || [ ! -f "${FLUIDD_PATH}/index.html" ]; then
+        die "未检测到原版 Fluidd 前端: ${FLUIDD_PATH}。请先通过 KIAUH 安装原版 Fluidd 前端后，再重新运行本脚本。原版安装教程: https://docs.fluidd.xyz/installation/kiauh"
     fi
 
-    echo "[OK] 已检测到 Mainsail 前端: ${MAINSAIL_PATH}"
+    echo "[OK] 已检测到 Fluidd 前端: ${FLUIDD_PATH}"
 }
 
 function find_release_root {
@@ -223,21 +223,21 @@ function find_release_root {
     return 1
 }
 
-function install_or_update_mainsail_toolchanger {
+function install_or_update_fluidd_toolchanger {
     local tmp zip extract staged release_root release_url
     local old_config target_parent
 
     echo
     echo "========================================="
-    echo "- 安装/更新 mainsail-toolchanger 前端 -"
+    echo "- 安装/更新 fluidd-toolchanger 前端 -"
     echo "========================================="
     echo
 
     tmp="$(make_tmp_dir)"
-    zip="${tmp}/${MAINSAIL_TOOLCHANGER_ASSET}"
+    zip="${tmp}/${FLUIDD_TOOLCHANGER_ASSET}"
     extract="${tmp}/extract"
     staged="${tmp}/staged"
-    release_url="https://github.com/${MAINSAIL_TOOLCHANGER_REPO}/releases/latest/download/${MAINSAIL_TOOLCHANGER_ASSET}"
+    release_url="https://github.com/${FLUIDD_TOOLCHANGER_REPO}/releases/latest/download/${FLUIDD_TOOLCHANGER_ASSET}"
 
     mkdir -p "${extract}" "${staged}" || die "创建前端临时目录失败: ${tmp}"
     download_url "${release_url}" "${zip}"
@@ -246,36 +246,36 @@ function install_or_update_mainsail_toolchanger {
     unzip -q "${zip}" -d "${extract}" || die "解压 release 包失败: ${zip}"
 
     if ! release_root="$(find_release_root "${extract}")"; then
-        die "release 包中未找到 index.html，已中止前端更新。请检查 ${MAINSAIL_TOOLCHANGER_REPO} 的 ${MAINSAIL_TOOLCHANGER_ASSET} 内容。"
+        die "release 包中未找到 index.html，已中止前端更新。请检查 ${FLUIDD_TOOLCHANGER_REPO} 的 ${FLUIDD_TOOLCHANGER_ASSET} 内容。"
     fi
 
     cp -a "${release_root}/." "${staged}/" || die "复制前端文件到临时目录失败: ${release_root} -> ${staged}"
 
     old_config=""
-    if [ -f "${MAINSAIL_PATH}/config.json" ]; then
+    if [ -f "${FLUIDD_PATH}/config.json" ]; then
         old_config="${tmp}/config.json"
-        cp "${MAINSAIL_PATH}/config.json" "${old_config}" || die "复制现有 config.json 失败: ${MAINSAIL_PATH}/config.json"
+        cp "${FLUIDD_PATH}/config.json" "${old_config}" || die "复制现有 config.json 失败: ${FLUIDD_PATH}/config.json"
         cp "${old_config}" "${staged}/config.json" || die "保留 config.json 到新前端目录失败。"
         echo "[CONFIG] 已保留现有 config.json"
     fi
 
     [ -f "${staged}/index.html" ] || die "解压后的前端目录缺少 index.html，已中止。"
 
-    target_parent="$(dirname "${MAINSAIL_PATH}")"
+    target_parent="$(dirname "${FLUIDD_PATH}")"
     mkdir -p "${target_parent}" || die "无法创建前端父目录: ${target_parent}"
     [ -w "${target_parent}" ] || die "当前用户无权写入前端父目录: ${target_parent}"
 
-    if [ -e "${MAINSAIL_PATH}" ] || [ -L "${MAINSAIL_PATH}" ]; then
-        echo "[INSTALL] 移除现有前端目录 ${MAINSAIL_PATH}"
-        rm -rf -- "${MAINSAIL_PATH}" || die "移除现有前端目录失败: ${MAINSAIL_PATH}"
+    if [ -e "${FLUIDD_PATH}" ] || [ -L "${FLUIDD_PATH}" ]; then
+        echo "[INSTALL] 移除现有前端目录 ${FLUIDD_PATH}"
+        rm -rf -- "${FLUIDD_PATH}" || die "移除现有前端目录失败: ${FLUIDD_PATH}"
     fi
 
-    echo "[INSTALL] 部署前端到 ${MAINSAIL_PATH}"
-    if ! mv "${staged}" "${MAINSAIL_PATH}"; then
-        die "部署 mainsail-toolchanger 失败: ${MAINSAIL_PATH}"
+    echo "[INSTALL] 部署前端到 ${FLUIDD_PATH}"
+    if ! mv "${staged}" "${FLUIDD_PATH}"; then
+        die "部署 fluidd-toolchanger 失败: ${FLUIDD_PATH}"
     fi
 
-    echo "[DONE] mainsail-toolchanger 已更新。"
+    echo "[DONE] fluidd-toolchanger 已更新。"
 }
 
 function discover_moonraker_conf {
@@ -315,9 +315,9 @@ function remove_update_manager_section {
 
 function append_update_manager_sections {
     local conf="${1}"
-    local stats_path mainsail_path
+    local stats_path fluidd_path
     stats_path="$(pretty_home_path "${INSTALL_PATH}")"
-    mainsail_path="$(pretty_home_path "${MAINSAIL_PATH}")"
+    fluidd_path="$(pretty_home_path "${FLUIDD_PATH}")"
 
     {
         printf "\n"
@@ -329,10 +329,10 @@ function append_update_manager_sections {
         printf "primary_branch: main\n"
         printf "install_script: install.sh\n"
         printf "\n"
-        printf "[update_manager mainsail-toolchanger]\n"
+        printf "[update_manager fluidd-toolchanger]\n"
         printf "type: web\n"
-        printf "path: %s\n" "${mainsail_path}"
-        printf "repo: %s\n" "${MAINSAIL_TOOLCHANGER_REPO}"
+        printf "path: %s\n" "${fluidd_path}"
+        printf "repo: %s\n" "${FLUIDD_TOOLCHANGER_REPO}"
         printf "channel: stable\n"
         printf "persistent_files:\n"
         printf "    config.json\n"
@@ -366,6 +366,11 @@ function patch_moonraker_conf {
     tmp2="${tmp}/moonraker.conf.2"
 
     cp "${conf}" "${tmp1}" || die "复制 moonraker.conf 到临时文件失败: ${conf}"
+    remove_update_manager_section "[update_manager fluidd]" "${tmp1}" "${tmp2}" || die "处理 Moonraker 配置段失败: [update_manager fluidd]"
+    if ! cp "${tmp2}" "${tmp1}"; then
+        warn "更新 Moonraker 临时配置失败，已跳过 update_manager 自动配置。"
+        return
+    fi
     remove_update_manager_section "[update_manager mainsail]" "${tmp1}" "${tmp2}" || die "处理 Moonraker 配置段失败: [update_manager mainsail]"
     if ! cp "${tmp2}" "${tmp1}"; then
         warn "更新 Moonraker 临时配置失败，已跳过 update_manager 自动配置。"
@@ -378,6 +383,14 @@ function patch_moonraker_conf {
     fi
     if ! remove_update_manager_section "[update_manager mainsail-toolchanger]" "${tmp1}" "${tmp2}"; then
         warn "删除旧 mainsail-toolchanger update_manager 段失败，已跳过 update_manager 自动配置。"
+        return
+    fi
+    if ! cp "${tmp2}" "${tmp1}"; then
+        warn "更新 Moonraker 临时配置失败，已跳过 update_manager 自动配置。"
+        return
+    fi
+    if ! remove_update_manager_section "[update_manager fluidd-toolchanger]" "${tmp1}" "${tmp2}"; then
+        warn "删除旧 fluidd-toolchanger update_manager 段失败，已跳过 update_manager 自动配置。"
         return
     fi
 
@@ -419,16 +432,17 @@ function main {
 =================================================
 
 GH_PROXY: ${GH_PROXY:-未启用}
-前端仓库: ${MAINSAIL_TOOLCHANGER_REPO}
-前端目录: ${MAINSAIL_PATH}
+前端仓库: ${FLUIDD_TOOLCHANGER_REPO}
+前端目录: ${FLUIDD_PATH}
+前端包名: ${FLUIDD_TOOLCHANGER_ASSET}
 插件安装: $([ "${SKIP_PLUGIN_INSTALL}" = "1" ] && printf "跳过" || printf "执行")
 
 EOF
 
     preflight_checks
-    check_existing_mainsail
+    check_existing_fluidd
     run_plugin_installer
-    install_or_update_mainsail_toolchanger
+    install_or_update_fluidd_toolchanger
     patch_moonraker_conf
 
     cat <<EOF
@@ -437,7 +451,7 @@ EOF
 
 已处理：
     - klipper-toolchange-stats 插件
-    - mainsail-toolchanger 前端 (${MAINSAIL_PATH})
+    - fluidd-toolchanger 前端 (${FLUIDD_PATH})
     - moonraker.conf update_manager 配置（如配置文件存在）
 
 再次执行本脚本即可更新插件和前端。

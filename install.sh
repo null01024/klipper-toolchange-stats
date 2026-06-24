@@ -16,7 +16,7 @@ FRESH_INSTALL=0
 TOOLCHANGE_SCHEME="custom"
 TOOL_HARDWARE_MODE=""
 FRESH_TOOL_COUNT=""
-INSTALL_MAINSAIL=0
+INSTALL_FLUIDD=0
 TOOLCHANGER_STACK_RUNNING="${TOOLCHANGER_STACK_RUNNING:-0}"
 
 # 配置在 printer.cfg 中的 include 行（写在文件最顶部）
@@ -112,15 +112,15 @@ function ask_fresh_install {
     echo
 }
 
-function ask_install_mainsail {
+function ask_install_fluidd {
     if [ "${TOOLCHANGER_STACK_RUNNING}" = "1" ]; then
-        INSTALL_MAINSAIL=0
+        INSTALL_FLUIDD=0
         return
     fi
-    if ask_yes_no_default_no "是否安装/更新配套 Mainsail 前端？选择 y 将调用 install_toolchanger_stack.sh [y/N]: "; then
-        INSTALL_MAINSAIL=1
+    if ask_yes_no_default_no "是否安装/更新配套 Fluidd 前端？选择 y 将调用 install_toolchanger_stack.sh [y/N]: "; then
+        INSTALL_FLUIDD=1
     else
-        INSTALL_MAINSAIL=0
+        INSTALL_FLUIDD=0
     fi
     echo
 }
@@ -903,15 +903,15 @@ function restart_klipper {
     sudo systemctl restart klipper || die "重启 klipper.service 失败，请运行 systemctl status klipper 查看原因。"
 }
 
-function install_mainsail_frontend_if_requested {
+function install_fluidd_frontend_if_requested {
     local stack_script="${INSTALL_PATH}/install_toolchanger_stack.sh"
-    if [ "${INSTALL_MAINSAIL}" -ne 1 ]; then
+    if [ "${INSTALL_FLUIDD}" -ne 1 ]; then
         return
     fi
     [ -f "${stack_script}" ] || die "未找到 install_toolchanger_stack.sh: ${stack_script}"
-    echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 Mainsail 前端..."
+    echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 Fluidd 前端..."
     SKIP_PLUGIN_INSTALL=1 TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
-        bash "${stack_script}" || die "安装/更新 Mainsail 前端失败。"
+        bash "${stack_script}" || die "安装/更新 Fluidd 前端失败。"
 }
 
 printf "\n=========================================\n"
@@ -920,7 +920,7 @@ printf "=========================================\n\n"
 
 preflight_checks
 ask_fresh_install
-ask_install_mainsail
+ask_install_fluidd
 sync_repo
 link_extension
 clean_orphan_links
@@ -941,7 +941,7 @@ if [ "${FRESH_INSTALL}" -eq 1 ]; then
 fi
 patch_printer_cfg
 restart_klipper
-install_mainsail_frontend_if_requested
+install_fluidd_frontend_if_requested
 
 cat <<EOF
 
