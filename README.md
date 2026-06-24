@@ -97,17 +97,28 @@ bash install.sh
 随后会问：
 
 ```text
-是否安装/更新配套 Mainsail 前端？选择 y 将调用 install_toolchanger_stack.sh [y/N]:
+请选择是否安装/更新配套前端：
+  0. 不安装/更新前端
+  1. Fluidd
+  2. Mainsail（维护可能不及时）
+请输入 0..2 [0]:
 ```
 
-直接回车或输入 `n`：
+直接回车或输入 `0`：
 
 - 只安装 / 更新 Klipper 插件。
 
-输入 `y`：
+输入 `1`：
 
 - 插件安装完成后，会自动调用 `install_toolchanger_stack.sh`。
-- 脚本会检查已有 Mainsail 前端，备份并安装 `mainsail-toolchanger`。
+- 脚本会检查已有 Fluidd 前端，并安装 / 更新 `fluidd-toolchanger`。
+- 同时会更新 Moonraker 的 update_manager 配置。
+
+输入 `2`：
+
+- 插件安装完成后，会自动调用 `install_toolchanger_stack.sh`。
+- 脚本会检查已有 Mainsail 前端，并安装 / 更新 `mainsail-toolchanger`。
+- 注意：Mainsail 版本维护可能不及时。
 - 同时会更新 Moonraker 的 update_manager 配置。
 
 ### 换头方案
@@ -618,9 +629,9 @@ primary_branch: main
 install_script: install.sh
 ```
 
-## 配套 Mainsail 前端
+## 配套前端
 
-运行 `install.sh` 时输入 `y` 即可安装 / 更新配套 Mainsail 前端。该流程会调用 `install_toolchanger_stack.sh`，并跳过重复安装插件。
+运行 `install.sh` 时选择 `1` 可安装 / 更新配套 Fluidd 前端，选择 `2` 可安装 / 更新配套 Mainsail 前端。Mainsail 版本维护可能不及时。该流程会调用 `install_toolchanger_stack.sh`，并跳过重复安装插件。
 
 也可以直接运行 stack 脚本：
 
@@ -634,7 +645,7 @@ wget -qO- https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/m
 GH_PROXY=https://v6.gh-proxy.org/ wget -qO- https://v6.gh-proxy.org/https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install_toolchanger_stack.sh | GH_PROXY=https://v6.gh-proxy.org/ bash
 ```
 
-直接运行 stack 脚本时，它会先安装本插件，再安装 `mainsail-toolchanger` 前端。
+直接运行 stack 脚本时，它会先安装本插件，再安装默认的 `fluidd-toolchanger` 前端。
 
 ## 文件结构
 
