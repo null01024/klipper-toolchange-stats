@@ -919,9 +919,9 @@ echo "- Klipper multitool-stats 安装/更新脚本 -"
 printf "=========================================\n\n"
 
 preflight_checks
+sync_repo
 ask_fresh_install
 ask_install_fluidd
-sync_repo
 link_extension
 clean_orphan_links
 copy_config
