@@ -16,7 +16,7 @@ FRESH_INSTALL=0
 TOOLCHANGE_SCHEME="custom"
 TOOL_HARDWARE_MODE=""
 FRESH_TOOL_COUNT=""
-INSTALL_FLUIDD=0
+FRONTEND_CHOICE=0
 TOOLCHANGER_STACK_RUNNING="${TOOLCHANGER_STACK_RUNNING:-0}"
 
 # 配置在 printer.cfg 中的 include 行（写在文件最顶部）
@@ -112,16 +112,34 @@ function ask_fresh_install {
     echo
 }
 
-function ask_install_fluidd {
+function ask_frontend_choice {
+    local answer
     if [ "${TOOLCHANGER_STACK_RUNNING}" = "1" ]; then
-        INSTALL_FLUIDD=0
+        FRONTEND_CHOICE=0
         return
     fi
-    if ask_yes_no_default_no "是否安装/更新配套 Fluidd 前端？选择 y 将调用 install_toolchanger_stack.sh [y/N]: "; then
-        INSTALL_FLUIDD=1
-    else
-        INSTALL_FLUIDD=0
-    fi
+    while true; do
+        cat <<EOF
+请选择是否安装/更新配套前端：
+  0. 不安装/更新前端
+  1. Fluidd
+  2. Mainsail（维护可能不及时）
+请输入 0..2 [0]: 
+EOF
+        read_answer answer
+        if [ -z "${answer}" ]; then
+            answer=0
+        fi
+        case "${answer}" in
+            0|1|2)
+                FRONTEND_CHOICE="${answer}"
+                break
+                ;;
+            *)
+                echo "请输入 0..2 之间的数字。"
+                ;;
+        esac
+    done
     echo
 }
 
@@ -903,15 +921,33 @@ function restart_klipper {
     sudo systemctl restart klipper || die "重启 klipper.service 失败，请运行 systemctl status klipper 查看原因。"
 }
 
-function install_fluidd_frontend_if_requested {
+function install_frontend_if_requested {
     local stack_script="${INSTALL_PATH}/install_toolchanger_stack.sh"
-    if [ "${INSTALL_FLUIDD}" -ne 1 ]; then
+    local frontend_name
+    if [ "${FRONTEND_CHOICE}" -eq 0 ]; then
         return
     fi
     [ -f "${stack_script}" ] || die "未找到 install_toolchanger_stack.sh: ${stack_script}"
-    echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 Fluidd 前端..."
-    SKIP_PLUGIN_INSTALL=1 TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
-        bash "${stack_script}" || die "安装/更新 Fluidd 前端失败。"
+    case "${FRONTEND_CHOICE}" in
+        1)
+            frontend_name="Fluidd"
+            echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 ${frontend_name} 前端..."
+            SKIP_PLUGIN_INSTALL=1 TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
+                bash "${stack_script}" || die "安装/更新 ${frontend_name} 前端失败。"
+            ;;
+        2)
+            frontend_name="Mainsail"
+            echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 ${frontend_name} 前端..."
+            SKIP_PLUGIN_INSTALL=1 TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
+                FLUIDD_PATH="${HOME}/mainsail" \
+                FLUIDD_TOOLCHANGER_REPO="null01024/mainsail-toolchanger" \
+                FLUIDD_TOOLCHANGER_ASSET="mainsail.zip" \
+                FRONTEND_NAME="Mainsail" \
+                FRONTEND_TOOLCHANGER_NAME="mainsail-toolchanger" \
+                FRONTEND_UPDATE_MANAGER_NAME="mainsail-toolchanger" \
+                bash "${stack_script}" || die "安装/更新 ${frontend_name} 前端失败。"
+            ;;
+    esac
 }
 
 printf "\n=========================================\n"
@@ -921,7 +957,7 @@ printf "=========================================\n\n"
 preflight_checks
 sync_repo
 ask_fresh_install
-ask_install_fluidd
+ask_frontend_choice
 link_extension
 clean_orphan_links
 copy_config
@@ -941,7 +977,7 @@ if [ "${FRESH_INSTALL}" -eq 1 ]; then
 fi
 patch_printer_cfg
 restart_klipper
-install_fluidd_frontend_if_requested
+install_frontend_if_requested
 
 cat <<EOF
 

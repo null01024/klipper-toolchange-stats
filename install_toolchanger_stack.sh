@@ -21,6 +21,9 @@ CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
 FLUIDD_PATH="${FLUIDD_PATH:-${MAINSAIL_PATH:-${HOME}/fluidd}}"
 FLUIDD_TOOLCHANGER_REPO="${FLUIDD_TOOLCHANGER_REPO:-${MAINSAIL_TOOLCHANGER_REPO:-null01024/fluidd-toolchanger}}"
 FLUIDD_TOOLCHANGER_ASSET="${FLUIDD_TOOLCHANGER_ASSET:-${MAINSAIL_TOOLCHANGER_ASSET:-fluidd.zip}}"
+FRONTEND_NAME="${FRONTEND_NAME:-Fluidd}"
+FRONTEND_TOOLCHANGER_NAME="${FRONTEND_TOOLCHANGER_NAME:-fluidd-toolchanger}"
+FRONTEND_UPDATE_MANAGER_NAME="${FRONTEND_UPDATE_MANAGER_NAME:-fluidd-toolchanger}"
 GH_PROXY="${GH_PROXY:-}"
 SKIP_PLUGIN_INSTALL="${SKIP_PLUGIN_INSTALL:-0}"
 
@@ -187,15 +190,15 @@ function run_plugin_installer {
 function check_existing_fluidd {
     echo
     echo "========================================="
-    echo "- 检查原版 Fluidd 前端 -"
+    echo "- 检查原版 ${FRONTEND_NAME} 前端 -"
     echo "========================================="
     echo
 
     if [ ! -d "${FLUIDD_PATH}" ] || [ ! -f "${FLUIDD_PATH}/index.html" ]; then
-        die "未检测到原版 Fluidd 前端: ${FLUIDD_PATH}。请先通过 KIAUH 安装原版 Fluidd 前端后，再重新运行本脚本。原版安装教程: https://docs.fluidd.xyz/installation/kiauh"
+        die "未检测到原版 ${FRONTEND_NAME} 前端: ${FLUIDD_PATH}。请先通过 KIAUH 安装原版 ${FRONTEND_NAME} 前端后，再重新运行本脚本。"
     fi
 
-    echo "[OK] 已检测到 Fluidd 前端: ${FLUIDD_PATH}"
+    echo "[OK] 已检测到 ${FRONTEND_NAME} 前端: ${FLUIDD_PATH}"
 }
 
 function find_release_root {
@@ -229,7 +232,7 @@ function install_or_update_fluidd_toolchanger {
 
     echo
     echo "========================================="
-    echo "- 安装/更新 fluidd-toolchanger 前端 -"
+    echo "- 安装/更新 ${FRONTEND_TOOLCHANGER_NAME} 前端 -"
     echo "========================================="
     echo
 
@@ -272,10 +275,10 @@ function install_or_update_fluidd_toolchanger {
 
     echo "[INSTALL] 部署前端到 ${FLUIDD_PATH}"
     if ! mv "${staged}" "${FLUIDD_PATH}"; then
-        die "部署 fluidd-toolchanger 失败: ${FLUIDD_PATH}"
+        die "部署 ${FRONTEND_TOOLCHANGER_NAME} 失败: ${FLUIDD_PATH}"
     fi
 
-    echo "[DONE] fluidd-toolchanger 已更新。"
+    echo "[DONE] ${FRONTEND_TOOLCHANGER_NAME} 已更新。"
 }
 
 function discover_moonraker_conf {
@@ -329,7 +332,7 @@ function append_update_manager_sections {
         printf "primary_branch: main\n"
         printf "install_script: install.sh\n"
         printf "\n"
-        printf "[update_manager fluidd-toolchanger]\n"
+        printf "[update_manager %s]\n" "${FRONTEND_UPDATE_MANAGER_NAME}"
         printf "type: web\n"
         printf "path: %s\n" "${fluidd_path}"
         printf "repo: %s\n" "${FLUIDD_TOOLCHANGER_REPO}"
@@ -432,6 +435,7 @@ function main {
 =================================================
 
 GH_PROXY: ${GH_PROXY:-未启用}
+前端类型: ${FRONTEND_NAME}
 前端仓库: ${FLUIDD_TOOLCHANGER_REPO}
 前端目录: ${FLUIDD_PATH}
 前端包名: ${FLUIDD_TOOLCHANGER_ASSET}
@@ -451,7 +455,7 @@ EOF
 
 已处理：
     - klipper-toolchange-stats 插件
-    - fluidd-toolchanger 前端 (${FLUIDD_PATH})
+    - ${FRONTEND_TOOLCHANGER_NAME} 前端 (${FLUIDD_PATH})
     - moonraker.conf update_manager 配置（如配置文件存在）
 
 再次执行本脚本即可更新插件和前端。
