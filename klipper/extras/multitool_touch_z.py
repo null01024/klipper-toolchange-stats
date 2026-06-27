@@ -14,6 +14,7 @@ class MultitoolTouchZ:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
+        self.name = config.get_name()
 
         self.use_z_endstop = config.getboolean('use_z_endstop', False)
         self.pin = config.get('pin', None)
@@ -70,11 +71,11 @@ class MultitoolTouchZ:
         if self.use_z_endstop:
             rails = getattr(kin, 'rails', None)
             if rails is None or len(rails) < 3:
-                raise self.printer.config_error(
+                raise self.printer.command_error(
                     "[multitool_touch_z] use_z_endstop 需要可访问的 Z rail")
             endstops = rails[2].get_endstops()
             if not endstops:
-                raise self.printer.config_error(
+                raise self.printer.command_error(
                     "[multitool_touch_z] 未找到 [stepper_z] endstop_pin")
             self.mcu_endstop = endstops[0][0]
             return
@@ -106,9 +107,18 @@ class MultitoolTouchZ:
                 self.mcu_endstop, movepos, speed, check_movement=True)
         except self.printer.command_error as e:
             raise self.printer.command_error(
-                "TOUCH_Z_PROBE 未在 %.3fmm 下探范围内触发 pin=%s: %s"
-                % (probe_depth, self.pin, str(e)))
+                "TOUCH_Z_PROBE 未在 %.3fmm 下探范围内触发 %s: %s"
+                % (probe_depth, self._trigger_name(), str(e)))
         return epos[2]
+
+    def _trigger_name(self):
+        if self.use_z_endstop:
+            return "[stepper_z] endstop_pin"
+        return "pin=%s" % (self.pin,)
+
+    def _raise_internal_as_command_error(self, cmd_name, exc):
+        logging.exception("%s failed", cmd_name)
+        raise self.printer.command_error("%s 执行失败: %s" % (cmd_name, exc))
 
     def _calc_sample_result(self, samples):
         values = sorted(samples)
@@ -186,6 +196,14 @@ class MultitoolTouchZ:
         return offset_z
 
     def cmd_TOUCH_Z_PROBE(self, gcmd):
+        try:
+            self._cmd_TOUCH_Z_PROBE(gcmd)
+        except self.printer.command_error:
+            raise
+        except Exception as e:
+            self._raise_internal_as_command_error("TOUCH_Z_PROBE", e)
+
+    def _cmd_TOUCH_Z_PROBE(self, gcmd):
         samples = gcmd.get_int('SAMPLES', self.samples, minval=1, maxval=20)
         speed = gcmd.get_float('SPEED', self.speed, above=0.0)
         lift_speed = gcmd.get_float('LIFT_SPEED', self.lift_speed, above=0.0)
@@ -208,6 +226,15 @@ class MultitoolTouchZ:
             % (z_value, ','.join(['%.6f' % v for v in results])))
 
     def cmd_TOUCH_Z_CALIBRATE_TOOL(self, gcmd):
+        try:
+            self._cmd_TOUCH_Z_CALIBRATE_TOOL(gcmd)
+        except self.printer.command_error:
+            raise
+        except Exception as e:
+            self._raise_internal_as_command_error(
+                "TOUCH_Z_CALIBRATE_TOOL", e)
+
+    def _cmd_TOUCH_Z_CALIBRATE_TOOL(self, gcmd):
         tool_name = gcmd.get('TOOL', None)
         if tool_name is None:
             raise gcmd.error("TOOL 参数必填，例如 TOOL=0")
