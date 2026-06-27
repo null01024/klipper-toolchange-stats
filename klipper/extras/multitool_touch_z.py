@@ -103,8 +103,7 @@ class MultitoolTouchZ:
         movepos[2] -= probe_depth
         phoming = self.printer.lookup_object('homing')
         try:
-            epos = phoming.probing_move(
-                self.mcu_endstop, movepos, speed, check_movement=True)
+            epos = phoming.probing_move(self.mcu_endstop, movepos, speed)
         except self.printer.command_error as e:
             raise self.printer.command_error(
                 "TOUCH_Z_PROBE 未在 %.3fmm 下探范围内触发 %s: %s"
