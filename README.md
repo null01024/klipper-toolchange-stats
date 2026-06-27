@@ -488,6 +488,61 @@ z_offset_adaptive: True
 
 每次打印首次使用的工具会成为本次 Z 基准，后续工具使用相对 Z 差值。
 
+### 独立微动 / 压力热床 Z 校准
+
+如果你的 `[probe]` 或 `[probe_eddy_current]` 已用于涡流扫床，不希望把压力热床配置成 probe，或者没有Tap。可以启用独立的接触式 Z 插件：
+
+```ini
+[multitool_touch_z]
+pin: ^!mcu:PRESSURE_BED
+speed: 2.0
+lift_speed: 5.0
+probe_depth: 5.0
+sample_retract_dist: 2.0
+samples: 3
+samples_result: median
+samples_tolerance: 0.05
+samples_tolerance_retries: 3
+final_lift_z: 2.0
+base_tool: 0
+save_prefix: t
+```
+
+这个插件会直接使用独立 pin 做 Z 向 homing/probing move，记录触发时的 Z 坐标；它不注册 `[probe]`，也不会影响涡流扫床。
+
+常用命令：
+
+```gcode
+TOUCH_Z_PROBE
+TOUCH_Z_CALIBRATE_TOOL TOOL=0
+TOUCH_Z_CALIBRATE_TOOL TOOL=1
+TOUCH_Z_CALIBRATE_TOOL TOOL=1 SAVE=0 UPDATE_EDDY=1
+QUERY_TOUCH_Z
+CLEAR_TOUCH_Z
+```
+
+`TOUCH_Z_CALIBRATE_TOOL` 会按 `base_tool` 作为基准保存：
+
+```text
+t0_offset_z = 0
+t1_offset_z = T1触发Z - T0触发Z
+...
+```
+
+然后由 `[multitool_offsets]` 自动读取。使用前需要先 `G28`，并把喷嘴移动到压力热床有效触发区域上方。
+
+如果同时使用 `tool_eddy_calibration.py` 做涡流 XY 对刀，可用 `UPDATE_EDDY=1` 让插件在测完 Z 后直接执行：
+
+```gcode
+SET_TOOL_Z TOOL=<n> Z=<触发Z>
+```
+
+这样 `calibration-eddy.cfg` 里原来的 `PROBE METHOD=tap` 可以替换为：
+
+```gcode
+TOUCH_Z_CALIBRATE_TOOL TOOL={tool} CHANGE_TOOL=0 SAVE=0 UPDATE_EDDY=1
+```
+
 ## 自动对刀校准
 
 安装脚本选择 `1) 微动对刀` 时会下载 `tools_calibrate.py`，并复制：
