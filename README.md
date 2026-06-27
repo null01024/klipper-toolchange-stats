@@ -501,6 +501,12 @@ speed: 2.0
 lift_speed: 5.0
 probe_depth: 5.0
 sample_retract_dist: 2.0
+calibration_x: 150.0
+calibration_y: 150.0
+calibration_z: 0.0
+calibration_clearance: 2.0
+calibration_travel_speed: 100.0
+calibration_z_speed: 5.0
 samples: 3
 samples_result: median
 samples_tolerance: 0.05
@@ -522,6 +528,12 @@ speed: 2.0
 lift_speed: 5.0
 probe_depth: 5.0
 sample_retract_dist: 2.0
+calibration_x: 150.0
+calibration_y: 150.0
+calibration_z: 0.0
+calibration_clearance: 2.0
+calibration_travel_speed: 100.0
+calibration_z_speed: 5.0
 samples: 3
 samples_result: median
 samples_tolerance: 0.05
@@ -532,6 +544,8 @@ save_prefix: t
 ```
 
 这个插件会使用独立 pin 或复用 Z endstop 做 Z 向 homing/probing move，记录触发时的 Z 坐标；它不注册 `[probe]`，也不会影响涡流扫床。
+
+`calibration_x/y/z` 是接触式 Z 校准点。压力热床通常把 `calibration_x/y` 设为热床中心，`calibration_z` 设为 `0.0`；独立微动开关则按实际开关触发点坐标填写。`calibration_z` 是触发面的标称坐标，不是安全高度。`TOUCH_Z_CALIBRATE_TOOL` 会先移动到 `calibration_z + calibration_clearance`，再向下最多探测 `probe_depth`，因此 `calibration_clearance` 必须小于 `probe_depth`。
 
 常用命令：
 
@@ -552,7 +566,7 @@ t1_offset_z = T1触发Z - T0触发Z
 ...
 ```
 
-然后由 `[multitool_offsets]` 自动读取。使用前需要先 `G28`，并把喷嘴移动到压力热床有效触发区域上方。
+然后由 `[multitool_offsets]` 自动读取。使用前需要先 `G28`；`TOUCH_Z_CALIBRATE_TOOL` 会自动移动到配置的校准点上方，`TOUCH_Z_PROBE` 则仍然只在当前位置手动探测。
 
 如果同时使用 `tool_eddy_calibration.py` 做涡流 XY 对刀，可用 `UPDATE_EDDY=1` 让插件在测完 Z 后直接执行：
 

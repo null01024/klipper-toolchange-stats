@@ -39,6 +39,15 @@ class MultitoolTouchZ:
         self.probe_depth = config.getfloat('probe_depth', 5.0, above=0.0)
         self.final_lift_z = config.getfloat('final_lift_z', 2.0, minval=0.0)
         self.clear_xy_offset = config.getboolean('clear_xy_offset', False)
+        self.calibration_x = config.getfloat('calibration_x', None)
+        self.calibration_y = config.getfloat('calibration_y', None)
+        self.calibration_z = config.getfloat('calibration_z', 0.0)
+        self.calibration_clearance = config.getfloat(
+            'calibration_clearance', self.sample_retract_dist, minval=0.0)
+        self.calibration_travel_speed = config.getfloat(
+            'calibration_travel_speed', 100.0, above=0.0)
+        self.calibration_z_speed = config.getfloat(
+            'calibration_z_speed', self.lift_speed, above=0.0)
 
         self.mcu_endstop = None
         if not self.use_z_endstop:
@@ -127,6 +136,44 @@ class MultitoolTouchZ:
         if len(values) & 1:
             return values[mid]
         return (values[mid - 1] + values[mid]) / 2.
+
+    def _get_probe_start_z(self):
+        return self.calibration_z + self.calibration_clearance
+
+    def _get_probe_lower_margin(self, probe_depth):
+        return probe_depth - self.calibration_clearance
+
+    def _check_calibration_config(self, probe_depth):
+        if self.calibration_x is None or self.calibration_y is None:
+            raise self.printer.command_error(
+                "TOUCH_Z_CALIBRATE_TOOL 需要在 [multitool_touch_z] 配置 "
+                "calibration_x 和 calibration_y")
+        if self.calibration_clearance >= probe_depth:
+            raise self.printer.command_error(
+                "TOUCH_Z_CALIBRATE_TOOL 配置错误: "
+                "calibration_clearance=%.3f 必须小于 PROBE_DEPTH=%.3f；"
+                "请增大 probe_depth 或减小 calibration_clearance"
+                % (self.calibration_clearance, probe_depth))
+
+    def _move_to_calibration_point(self, probe_depth):
+        self._check_can_probe()
+        self._check_calibration_config(probe_depth)
+        toolhead = self.printer.lookup_object('toolhead')
+        probe_start_z = self._get_probe_start_z()
+        curpos = toolhead.get_position()
+        safe_z = max(curpos[2], probe_start_z)
+
+        if curpos[2] < safe_z:
+            toolhead.manual_move(
+                [None, None, safe_z], self.calibration_z_speed)
+            toolhead.wait_moves()
+        toolhead.manual_move(
+            [self.calibration_x, self.calibration_y, None],
+            self.calibration_travel_speed)
+        toolhead.wait_moves()
+        toolhead.manual_move(
+            [None, None, probe_start_z], self.calibration_z_speed)
+        toolhead.wait_moves()
 
     def _probe(self, samples, speed, lift_speed, retract_dist, probe_depth,
                tolerance, retries, final_lift_z):
@@ -258,13 +305,16 @@ class MultitoolTouchZ:
             self.gcode.run_script_from_command("T%d" % tool)
 
         self.gcode.run_script_from_command("M400")
+        probe_depth = gcmd.get_float(
+            'PROBE_DEPTH', self.probe_depth, above=0.0)
+        self._move_to_calibration_point(probe_depth)
         z_value, results = self._probe(
             gcmd.get_int('SAMPLES', self.samples, minval=1, maxval=20),
             gcmd.get_float('SPEED', self.speed, above=0.0),
             gcmd.get_float('LIFT_SPEED', self.lift_speed, above=0.0),
             gcmd.get_float('SAMPLE_RETRACT_DIST', self.sample_retract_dist,
                            minval=0.0),
-            gcmd.get_float('PROBE_DEPTH', self.probe_depth, above=0.0),
+            probe_depth,
             gcmd.get_float('SAMPLES_TOLERANCE', self.samples_tolerance,
                            minval=0.0),
             gcmd.get_int('SAMPLES_TOLERANCE_RETRIES',
@@ -298,6 +348,16 @@ class MultitoolTouchZ:
                 self._last_tool if self._last_tool is not None else 'none',
                 self._last_z,
                 ','.join(['%.6f' % v for v in self._last_samples])))
+        if self.calibration_x is None or self.calibration_y is None:
+            lines.append("calibration_point=unconfigured")
+        else:
+            lines.append(
+                "calibration_point=X%.3f Y%.3f Z%.3f "
+                "clearance=%.3f probe_start_z=%.3f lower_margin=%.3f"
+                % (self.calibration_x, self.calibration_y,
+                   self.calibration_z, self.calibration_clearance,
+                   self._get_probe_start_z(),
+                   self._get_probe_lower_margin(self.probe_depth)))
         for tool in sorted(self._tool_z):
             lines.append("T%d Z=%.6f" % (tool, self._tool_z[tool]))
         gcmd.respond_info("\n".join(lines))
@@ -330,6 +390,17 @@ class MultitoolTouchZ:
             'last_samples': list(self._last_samples),
             'tools': tools,
             'base_tool': self.default_tool,
+            'calibration': {
+                'x': self.calibration_x,
+                'y': self.calibration_y,
+                'z': self.calibration_z,
+                'clearance': self.calibration_clearance,
+                'probe_start_z': self._get_probe_start_z(),
+                'lower_margin': self._get_probe_lower_margin(
+                    self.probe_depth),
+                'travel_speed': self.calibration_travel_speed,
+                'z_speed': self.calibration_z_speed,
+            },
         }
 
 
