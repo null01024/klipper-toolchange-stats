@@ -93,8 +93,19 @@ bash install.sh
 - 进入新安装流程。
 - 生成 `multihotend.cfg`。
 - 可选择换头方案。
-- 输入的热端数量会自动同步到 `multitool_config.cfg` 和 `calibration.cfg`。
+- 输入的热端数量会自动同步到 `multitool_config.cfg` 和所选对刀配置。
 - 如果选择 CxChanger，还会自动同步 `change_tool.cfg` 中 `t0..tN` 的 dock 坐标变量数量。
+
+随后会问：
+
+```text
+请选择对刀方案：
+  0) 无对刀：不安装对刀插件，不部署对刀配置。
+  1) 微动对刀：安装 tools_calibrate.py，并部署 calibration.cfg。
+  2) 涡流对刀：安装 tool_eddy_calibration.py，并部署 calibration-eddy.cfg。
+```
+
+微动和涡流对刀脚本不会放入本仓库，安装时按选择从上游仓库下载。
 
 随后会问：
 
@@ -479,7 +490,7 @@ z_offset_adaptive: True
 
 ## 自动对刀校准
 
-安装脚本会复制：
+安装脚本选择 `1) 微动对刀` 时会下载 `tools_calibrate.py`，并复制：
 
 ```text
 ~/printer_data/config/multitool/calibration.cfg
@@ -666,12 +677,11 @@ klipper-toolchange-stats/
     ├── multitool_clamp.py
     ├── multitool_xy_guard.py
     ├── multitool_stats.py
-    ├── multitool_filament.py
-    └── tools_calibrate.py
+    └── multitool_filament.py
 ```
 
 ## 许可证
 
-`klipper/extras/tools_calibrate.py` vendoring 自 `viesturz/klipper-toolchanger`，遵循其原始 GPLv3 许可证。
+微动对刀的 `tools_calibrate.py` 和涡流对刀的 `tool_eddy_calibration.py` / `calibration-eddy.cfg` 不放入本仓库，由安装脚本按选择从对应上游仓库下载，并遵循各自上游许可证。
 
 本仓库新增内容默认 MIT。
