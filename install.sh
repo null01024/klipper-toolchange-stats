@@ -1162,6 +1162,9 @@ printer.cfg 顶部已自动加入：
     4. 检查 printer.cfg 或其它主配置
        - 确认包含：${INCLUDE_LINE}
 
+    5. 涡流对刀详细配置和使用说明
+       - https://demo.chengxg.top/pangxie/#/articles/eddy_calibration
+
     更多配置说明请查看 README：
     https://github.com/null01024/klipper-toolchange-stats#readme
 
