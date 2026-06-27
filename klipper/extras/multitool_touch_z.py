@@ -2,7 +2,8 @@
 # Klipper Multitool - 独立微动/压力热床 Z 触发校准
 #
 # 职责：
-#   - 使用独立 pin 做 Z 向接触探测，不占用 Klipper 的 [probe]
+#   - 使用独立 pin 或复用 [stepper_z] endstop_pin 做 Z 向接触探测
+#   - 不占用 Klipper 的 [probe]，不影响涡流扫床
 #   - 记录每个工具的触发 Z，并按 T0 基准保存 t{n}_offset_z
 #   - 供涡流扫床 / 涡流 XY 校准场景复用接触式 Z 基准
 
@@ -14,7 +15,11 @@ class MultitoolTouchZ:
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
 
-        self.pin = config.get('pin')
+        self.use_z_endstop = config.getboolean('use_z_endstop', False)
+        self.pin = config.get('pin', None)
+        if not self.use_z_endstop and self.pin is None:
+            raise config.error(
+                "[multitool_touch_z] 需要配置 pin，或设置 use_z_endstop: True")
         self.save_prefix = config.get('save_prefix', 't')
         self.default_tool = config.getint('base_tool', 0, minval=0)
 
@@ -34,8 +39,10 @@ class MultitoolTouchZ:
         self.final_lift_z = config.getfloat('final_lift_z', 2.0, minval=0.0)
         self.clear_xy_offset = config.getboolean('clear_xy_offset', False)
 
-        pins = self.printer.lookup_object('pins')
-        self.mcu_endstop = pins.setup_pin('endstop', self.pin)
+        self.mcu_endstop = None
+        if not self.use_z_endstop:
+            pins = self.printer.lookup_object('pins')
+            self.mcu_endstop = pins.setup_pin('endstop', self.pin)
 
         self._last_z = None
         self._last_tool = None
@@ -47,7 +54,7 @@ class MultitoolTouchZ:
 
         self.gcode.register_command(
             'TOUCH_Z_PROBE', self.cmd_TOUCH_Z_PROBE,
-            desc='使用独立微动/压力热床 pin 探测当前工具 Z 触发坐标')
+            desc='使用独立 pin 或 Z endstop 探测当前工具 Z 触发坐标')
         self.gcode.register_command(
             'TOUCH_Z_CALIBRATE_TOOL', self.cmd_TOUCH_Z_CALIBRATE_TOOL,
             desc='测量并保存工具相对 T0 的 Z 偏移')
@@ -60,6 +67,17 @@ class MultitoolTouchZ:
 
     def _handle_mcu_identify(self):
         kin = self.printer.lookup_object('toolhead').get_kinematics()
+        if self.use_z_endstop:
+            rails = getattr(kin, 'rails', None)
+            if rails is None or len(rails) < 3:
+                raise self.printer.config_error(
+                    "[multitool_touch_z] use_z_endstop 需要可访问的 Z rail")
+            endstops = rails[2].get_endstops()
+            if not endstops:
+                raise self.printer.config_error(
+                    "[multitool_touch_z] 未找到 [stepper_z] endstop_pin")
+            self.mcu_endstop = endstops[0][0]
+            return
         for stepper in kin.get_steppers():
             if stepper.is_active_axis('z'):
                 self.mcu_endstop.add_stepper(stepper)
@@ -75,6 +93,9 @@ class MultitoolTouchZ:
                 "TOUCH_Z_PROBE 需要先完成 XY 归位")
 
     def _single_probe(self, speed, probe_depth):
+        if self.mcu_endstop is None:
+            raise self.printer.command_error(
+                "TOUCH_Z_PROBE 尚未初始化 endstop，请检查配置")
         toolhead = self.printer.lookup_object('toolhead')
         curpos = toolhead.get_position()
         movepos = list(curpos)
