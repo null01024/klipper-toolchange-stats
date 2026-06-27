@@ -14,16 +14,21 @@ REPO_URL="${REPO_URL:-https://github.com/null01024/klipper-toolchange-stats.git}
 GH_PROXY="${GH_PROXY:-}"
 FRESH_INSTALL=0
 TOOLCHANGE_SCHEME="custom"
+TOOL_CALIBRATION_SCHEME="none"
 TOOL_HARDWARE_MODE=""
 FRESH_TOOL_COUNT=""
 FRONTEND_CHOICE=0
 TOOLCHANGER_STACK_RUNNING="${TOOLCHANGER_STACK_RUNNING:-0}"
+TOOLS_CALIBRATE_URL="${TOOLS_CALIBRATE_URL:-https://raw.githubusercontent.com/viesturz/klipper-toolchanger/main/klipper/extras/tools_calibrate.py}"
+TOOL_EDDY_CALIBRATION_URL="${TOOL_EDDY_CALIBRATION_URL:-https://raw.githubusercontent.com/chengxg/tool_eddy_calibration/master/tool_eddy_calibration.py}"
+CALIBRATION_EDDY_CFG_URL="${CALIBRATION_EDDY_CFG_URL:-https://raw.githubusercontent.com/chengxg/tool_eddy_calibration/master/config/calibration-eddy.cfg}"
 
 # 配置在 printer.cfg 中的 include 行（写在文件最顶部）
 INCLUDE_LINE="[include multitool/*.cfg]"
 CONFIG_SUBDIR="multitool"
 # 需要部署到用户配置目录的 cfg 列表（空格分隔，已存在则不覆盖）
-CONFIG_FILES="multitool_config.cfg calibration.cfg"
+CONFIG_FILES="multitool_config.cfg"
+DEPLOYED_CONFIG_FILES="${CONFIG_FILES}"
 
 set -eu
 export LC_ALL=C
@@ -164,6 +169,35 @@ function proxy_url {
     esac
 }
 
+function download_url {
+    local url="${1}"
+    local dest="${2}"
+    local proxied_url tmp_file dest_dir
+
+    proxied_url="$(proxy_url "${url}")"
+    dest_dir="$(dirname "${dest}")"
+    mkdir -p "${dest_dir}" || die "无法创建下载目标目录: ${dest_dir}"
+    [ -w "${dest_dir}" ] || die "当前用户无权写入下载目标目录: ${dest_dir}"
+    tmp_file="$(mktemp "${dest}.tmp.XXXXXX")" || die "创建下载临时文件失败: ${dest}"
+
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -fsSL "${proxied_url}" -o "${tmp_file}"; then
+            rm -f "${tmp_file}"
+            die "下载失败: ${url}"
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if ! wget -qO "${tmp_file}" "${proxied_url}"; then
+            rm -f "${tmp_file}"
+            die "下载失败: ${url}"
+        fi
+    else
+        rm -f "${tmp_file}"
+        die "未找到 curl 或 wget，无法下载: ${url}"
+    fi
+
+    mv "${tmp_file}" "${dest}" || die "写入下载文件失败: ${dest}"
+}
+
 function preflight_checks {
     if [ "$EUID" -eq 0 ]; then
         die "不要以 root 身份运行此脚本！请使用普通用户执行，脚本需要时会调用 sudo。"
@@ -262,6 +296,11 @@ function link_extension {
     for file in "${files[@]}"; do
         local base target
         base="$(basename "${file}")"
+        case "${base}" in
+            tools_calibrate.py|tool_eddy_calibration.py)
+                continue
+                ;;
+        esac
         target="${KLIPPER_PATH}/klippy/extras/${base}"
 
         # 如果目标已存在且不是本仓库的软链，直接覆盖为本仓库链接。
@@ -276,6 +315,32 @@ function link_extension {
         ln -sfnT "${file}" "${target}" || die "创建 Klipper extras 软链接失败: ${target} -> ${file}"
         echo "  -> ${base}"
     done
+}
+
+function install_tool_calibration_python {
+    local target
+    [ -w "${KLIPPER_PATH}/klippy/extras" ] || die "当前用户无权写入 Klipper extras 目录: ${KLIPPER_PATH}/klippy/extras"
+
+    case "${TOOL_CALIBRATION_SCHEME}" in
+        none)
+            echo "[INSTALL] 对刀方案：无对刀，跳过对刀 Python 插件。"
+            ;;
+        touch)
+            target="${KLIPPER_PATH}/klippy/extras/tools_calibrate.py"
+            echo "[INSTALL] 下载微动对刀插件 tools_calibrate.py..."
+            download_url "${TOOLS_CALIBRATE_URL}" "${target}"
+            echo "  -> tools_calibrate.py"
+            ;;
+        eddy)
+            target="${KLIPPER_PATH}/klippy/extras/tool_eddy_calibration.py"
+            echo "[INSTALL] 下载涡流对刀插件 tool_eddy_calibration.py..."
+            download_url "${TOOL_EDDY_CALIBRATION_URL}" "${target}"
+            echo "  -> tool_eddy_calibration.py"
+            ;;
+        *)
+            die "未知对刀方案: ${TOOL_CALIBRATION_SCHEME}"
+            ;;
+    esac
 }
 
 function clean_orphan_links {
@@ -322,6 +387,40 @@ function copy_config {
             echo "  -> 已复制 ${cfg}"
         fi
     done
+}
+
+function install_tool_calibration_config {
+    local target_dir="${CONFIG_PATH}/${CONFIG_SUBDIR}"
+    local target_file
+
+    case "${TOOL_CALIBRATION_SCHEME}" in
+        none)
+            echo "[CONFIG] 对刀方案：无对刀，跳过对刀配置。"
+            ;;
+        touch)
+            target_file="${target_dir}/calibration.cfg"
+            if [ -f "${target_file}" ]; then
+                echo "  -> 已存在 calibration.cfg，跳过覆盖（保留用户修改）"
+            else
+                [ -f "${INSTALL_PATH}/calibration.cfg" ] || die "缺少默认配置文件: ${INSTALL_PATH}/calibration.cfg"
+                cp "${INSTALL_PATH}/calibration.cfg" "${target_file}" || die "复制 calibration.cfg 失败。"
+                echo "  -> 已复制 calibration.cfg"
+            fi
+            ;;
+        eddy)
+            target_file="${target_dir}/calibration-eddy.cfg"
+            if [ -f "${target_file}" ]; then
+                echo "  -> 已存在 calibration-eddy.cfg，跳过覆盖（保留用户修改）"
+            else
+                echo "[CONFIG] 下载涡流对刀配置 calibration-eddy.cfg..."
+                download_url "${CALIBRATION_EDDY_CFG_URL}" "${target_file}"
+                echo "  -> 已下载 calibration-eddy.cfg"
+            fi
+            ;;
+        *)
+            die "未知对刀方案: ${TOOL_CALIBRATION_SCHEME}"
+            ;;
+    esac
 }
 
 function extruder_name {
@@ -647,17 +746,30 @@ function patch_multitool_config_tool_count {
     esac
 }
 
+function calibration_config_file {
+    case "${TOOL_CALIBRATION_SCHEME}" in
+        touch) printf "%s\n" "${CONFIG_PATH}/${CONFIG_SUBDIR}/calibration.cfg" ;;
+        eddy) printf "%s\n" "${CONFIG_PATH}/${CONFIG_SUBDIR}/calibration-eddy.cfg" ;;
+        *) return 1 ;;
+    esac
+}
+
 function patch_calibration_tool_count {
     local count="${1}"
-    local cfg="${CONFIG_PATH}/${CONFIG_SUBDIR}/calibration.cfg"
+    local cfg cfg_base
     local tmp_cfg
 
+    if ! cfg="$(calibration_config_file)"; then
+        return
+    fi
+    cfg_base="$(basename "${cfg}")"
+
     [ -f "${cfg}" ] || {
-        echo "[CONFIG] 未找到 calibration.cfg，无法自动设置 variable_tool_count。"
+        echo "[CONFIG] 未找到 ${cfg_base}，无法自动设置 variable_tool_count。"
         return
     }
 
-    tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 calibration.cfg 临时文件失败。"
+    tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 ${cfg_base} 临时文件失败。"
     local awk_status
     if awk -v count="${count}" '
         /^\[/ {
@@ -685,16 +797,16 @@ function patch_calibration_tool_count {
     fi
     case "${awk_status}" in
         0)
-            mv "${tmp_cfg}" "${cfg}" || die "写入 calibration.cfg 失败: ${cfg}"
-            echo "[CONFIG] 已设置 calibration.cfg: variable_tool_count=${count}"
+            mv "${tmp_cfg}" "${cfg}" || die "写入 ${cfg_base} 失败: ${cfg}"
+            echo "[CONFIG] 已设置 ${cfg_base}: variable_tool_count=${count}"
             ;;
         2)
             rm -f "${tmp_cfg}"
-            echo "[CONFIG] 未在 calibration.cfg 的 _TOOL_CALIB_VARS 中找到 variable_tool_count，请手动设置为 ${count}。"
+            echo "[CONFIG] 未在 ${cfg_base} 的 _TOOL_CALIB_VARS 中找到 variable_tool_count，请手动设置为 ${count}。"
             ;;
         *)
             rm -f "${tmp_cfg}"
-            die "设置 calibration.cfg variable_tool_count 失败。"
+            die "设置 ${cfg_base} variable_tool_count 失败。"
             ;;
     esac
 }
@@ -817,6 +929,39 @@ EOF
             ""|0) TOOLCHANGE_SCHEME="custom"; return ;;
             1) TOOLCHANGE_SCHEME="cxchanger"; return ;;
             *) echo "输入无效，请输入 0 或 1。" ;;
+        esac
+    done
+}
+
+function ask_tool_calibration_scheme {
+    local answer
+    while true; do
+        cat <<EOF
+请选择对刀方案：
+  0) 无对刀：不安装对刀插件，不部署对刀配置。（不对刀咋玩多热端？？）
+  1) 微动对刀：安装 tools_calibrate.py，并部署 calibration.cfg。
+  2) 涡流对刀：安装 tool_eddy_calibration.py，并部署 calibration-eddy.cfg。
+
+EOF
+        printf "请输入 0,1,2 [默认 0]: "
+        read_answer answer
+        case "${answer}" in
+            ""|0)
+                TOOL_CALIBRATION_SCHEME="none"
+                DEPLOYED_CONFIG_FILES="${CONFIG_FILES}"
+                return
+                ;;
+            1)
+                TOOL_CALIBRATION_SCHEME="touch"
+                DEPLOYED_CONFIG_FILES="${CONFIG_FILES} calibration.cfg"
+                return
+                ;;
+            2)
+                TOOL_CALIBRATION_SCHEME="eddy"
+                DEPLOYED_CONFIG_FILES="${CONFIG_FILES} calibration-eddy.cfg"
+                return
+                ;;
+            *) echo "输入无效，请输入 0, 1 或 2。" ;;
         esac
     done
 }
@@ -957,10 +1102,13 @@ printf "=========================================\n\n"
 preflight_checks
 sync_repo
 ask_fresh_install
+ask_tool_calibration_scheme
 ask_frontend_choice
 link_extension
+install_tool_calibration_python
 clean_orphan_links
 copy_config
+install_tool_calibration_config
 if [ "${FRESH_INSTALL}" -eq 1 ]; then
     ask_toolchange_scheme
     if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
@@ -985,7 +1133,7 @@ cat <<EOF
 
 默认配置已部署到：
     ${CONFIG_PATH}/${CONFIG_SUBDIR}/
-        ${CONFIG_FILES}
+        ${DEPLOYED_CONFIG_FILES}
 
 printer.cfg 顶部已自动加入：
     ${INCLUDE_LINE}
