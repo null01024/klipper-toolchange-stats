@@ -492,6 +492,8 @@ z_offset_adaptive: True
 
 如果你的 `[probe]` 或 `[probe_eddy_current]` 已用于涡流扫床，不希望把压力热床配置成 probe，或者没有Tap。可以启用独立的接触式 Z 插件：
 
+独立 pin 模式：设置了 `pin` 且没有启用 `use_z_endstop` 时，插件使用这个 pin。
+
 ```ini
 [multitool_touch_z]
 pin: ^!mcu:PRESSURE_BED
@@ -508,7 +510,28 @@ base_tool: 0
 save_prefix: t
 ```
 
-这个插件会直接使用独立 pin 做 Z 向 homing/probing move，记录触发时的 Z 坐标；它不注册 `[probe]`，也不会影响涡流扫床。
+如果压力热床已经作为 `[stepper_z] endstop_pin` 使用，不要在这里再次写同一个 `pin`，否则 Klipper 会报 `pin ... used multiple times`。改用复用 Z endstop 模式：
+
+Z endstop 模式：设置 `use_z_endstop: True` 时，插件复用 `[stepper_z] endstop_pin`。
+
+```ini
+[multitool_touch_z]
+pin: ^!mcu:PRESSURE_BED        # 独立 pin 模式；设置 pin 时使用该 pin
+use_z_endstop: True
+speed: 2.0
+lift_speed: 5.0
+probe_depth: 5.0
+sample_retract_dist: 2.0
+samples: 3
+samples_result: median
+samples_tolerance: 0.05
+samples_tolerance_retries: 3
+final_lift_z: 2.0
+base_tool: 0
+save_prefix: t
+```
+
+这个插件会使用独立 pin 或复用 Z endstop 做 Z 向 homing/probing move，记录触发时的 Z 坐标；它不注册 `[probe]`，也不会影响涡流扫床。
 
 常用命令：
 
