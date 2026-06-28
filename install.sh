@@ -8,6 +8,7 @@
 #   bash ~/klipper-toolchange-stats/install.sh
 
 KLIPPER_PATH="${KLIPPER_PATH:-${HOME}/klipper}"
+MOONRAKER_PATH="${MOONRAKER_PATH:-${HOME}/moonraker}"
 INSTALL_PATH="${INSTALL_PATH:-${HOME}/klipper-toolchange-stats}"
 CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
 REPO_URL="${REPO_URL:-https://github.com/null01024/klipper-toolchange-stats.git}"
@@ -19,6 +20,8 @@ TOOL_HARDWARE_MODE=""
 FRESH_TOOL_COUNT=""
 FRONTEND_CHOICE=0
 TOOLCHANGER_STACK_RUNNING="${TOOLCHANGER_STACK_RUNNING:-0}"
+MOONRAKER_COMPONENT_INSTALLED=0
+MOONRAKER_CONF_CHANGED=0
 TOOLS_CALIBRATE_URL="${TOOLS_CALIBRATE_URL:-https://raw.githubusercontent.com/viesturz/klipper-toolchanger/main/klipper/extras/tools_calibrate.py}"
 TOOL_EDDY_CALIBRATION_URL="${TOOL_EDDY_CALIBRATION_URL:-https://raw.githubusercontent.com/chengxg/tool_eddy_calibration/master/tool_eddy_calibration.py}"
 CALIBRATION_EDDY_CFG_URL="${CALIBRATION_EDDY_CFG_URL:-https://raw.githubusercontent.com/chengxg/tool_eddy_calibration/master/config/calibration-eddy.cfg}"
@@ -315,6 +318,83 @@ function link_extension {
         ln -sfnT "${file}" "${target}" || die "创建 Klipper extras 软链接失败: ${target} -> ${file}"
         echo "  -> ${base}"
     done
+}
+
+function link_moonraker_components {
+    local src_dir="${INSTALL_PATH}/moonraker/components"
+    local dst_dir="${MOONRAKER_PATH}/moonraker/components"
+
+    if [ ! -d "${src_dir}" ]; then
+        return
+    fi
+    if [ ! -d "${dst_dir}" ]; then
+        echo "[INSTALL] 未找到 Moonraker components 目录，跳过 Orca lane_data 组件。"
+        echo "          如 Moonraker 不在默认路径，请用 MOONRAKER_PATH=... 重新运行。"
+        return
+    fi
+    [ -w "${dst_dir}" ] || die "当前用户无权写入 Moonraker components 目录: ${dst_dir}"
+
+    echo "[INSTALL] 链接 Moonraker 组件..."
+    local files file base target resolved
+    files=("${src_dir}"/*.py)
+    [ -e "${files[0]}" ] || return
+    for file in "${files[@]}"; do
+        base="$(basename "${file}")"
+        target="${dst_dir}/${base}"
+        if [ -e "${target}" ] || [ -L "${target}" ]; then
+            resolved="$(readlink "${target}" 2>/dev/null || true)"
+            if [ "${resolved}" != "${file}" ]; then
+                echo "  -> [WARN] ${base} 已存在 (${resolved:-非软链})，将覆盖为本仓库链接"
+            fi
+        fi
+        ln -sfnT "${file}" "${target}" || die "创建 Moonraker 组件软链接失败: ${target} -> ${file}"
+        echo "  -> ${base}"
+        MOONRAKER_COMPONENT_INSTALLED=1
+    done
+}
+
+function discover_moonraker_conf {
+    if [ -n "${MOONRAKER_CONF:-}" ]; then
+        [ -f "${MOONRAKER_CONF}" ] && printf "%s\n" "${MOONRAKER_CONF}"
+        return
+    fi
+
+    local candidate
+    for candidate in \
+        "${CONFIG_PATH}/moonraker.conf" \
+        "${HOME}/printer_data/config/moonraker.conf" \
+        "${HOME}/moonraker.conf"
+    do
+        if [ -f "${candidate}" ]; then
+            printf "%s\n" "${candidate}"
+            return
+        fi
+    done
+}
+
+function patch_moonraker_lane_data_conf {
+    local conf
+
+    if [ "${MOONRAKER_COMPONENT_INSTALLED}" -ne 1 ]; then
+        return
+    fi
+    conf="$(discover_moonraker_conf || true)"
+    if [ -z "${conf}" ]; then
+        echo "[MOONRAKER] 未找到 moonraker.conf，跳过自动启用 multitool_lane_data。"
+        return
+    fi
+    [ -r "${conf}" ] || die "当前用户无权读取 moonraker.conf: ${conf}"
+    [ -w "${conf}" ] || die "当前用户无权写入 moonraker.conf: ${conf}"
+    if grep -q '^[[:space:]]*\[multitool_lane_data\][[:space:]]*$' "${conf}"; then
+        echo "[MOONRAKER] multitool_lane_data 已启用。"
+        return
+    fi
+    {
+        printf "\n"
+        printf "[multitool_lane_data]\n"
+    } >> "${conf}" || die "写入 moonraker.conf 失败: ${conf}"
+    MOONRAKER_CONF_CHANGED=1
+    echo "[MOONRAKER] 已启用 multitool_lane_data: ${conf}"
 }
 
 function install_tool_calibration_python {
@@ -1073,6 +1153,18 @@ function restart_klipper {
     sudo systemctl restart klipper || die "重启 klipper.service 失败，请运行 systemctl status klipper 查看原因。"
 }
 
+function restart_moonraker_if_needed {
+    if [ "${MOONRAKER_CONF_CHANGED}" -ne 1 ]; then
+        return
+    fi
+    if sudo systemctl list-units --full -all -t service --no-legend 2>/dev/null | grep -qE '(^| )moonraker(@|[-_.a-zA-Z0-9]*\.service|\.service)'; then
+        echo "[POST-INSTALL] 重启 Moonraker 服务..."
+        sudo systemctl restart moonraker || die "重启 moonraker.service 失败，请运行 systemctl status moonraker 查看原因。"
+    else
+        echo "[MOONRAKER] 未检测到 moonraker.service，已跳过服务重启。"
+    fi
+}
+
 function install_frontend_if_requested {
     local stack_script="${INSTALL_PATH}/install_toolchanger_stack.sh"
     local frontend_name
@@ -1113,6 +1205,8 @@ ask_fresh_install
 ask_tool_calibration_scheme
 ask_frontend_choice
 link_extension
+link_moonraker_components
+patch_moonraker_lane_data_conf
 install_tool_calibration_python
 clean_orphan_links
 copy_config
@@ -1133,6 +1227,7 @@ if [ "${FRESH_INSTALL}" -eq 1 ]; then
 fi
 patch_printer_cfg
 restart_klipper
+restart_moonraker_if_needed
 install_frontend_if_requested
 
 cat <<EOF
