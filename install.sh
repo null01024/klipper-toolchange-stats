@@ -127,8 +127,8 @@ function ask_frontend_choice {
         cat <<EOF
 请选择是否安装/更新配套前端：
   0. 不安装/更新前端
-  1. Fluidd
-  2. Mainsail（维护可能不及时）
+  1. Fluidd（维护可能不及时）
+  2. Mainsail
 请输入 0,1,2 [0]: 
 EOF
         read_answer answer
