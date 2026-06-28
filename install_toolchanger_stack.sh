@@ -318,19 +318,10 @@ function remove_update_manager_section {
 
 function append_update_manager_sections {
     local conf="${1}"
-    local stats_path fluidd_path
-    stats_path="$(pretty_home_path "${INSTALL_PATH}")"
+    local fluidd_path
     fluidd_path="$(pretty_home_path "${FLUIDD_PATH}")"
 
     {
-        printf "\n"
-        printf "[update_manager klipper-toolchange-stats]\n"
-        printf "type: git_repo\n"
-        printf "path: %s\n" "${stats_path}"
-        printf "origin: https://github.com/null01024/klipper-toolchange-stats.git\n"
-        printf "managed_services: klipper\n"
-        printf "primary_branch: main\n"
-        printf "install_script: install.sh\n"
         printf "\n"
         printf "[update_manager %s]\n" "${FRONTEND_UPDATE_MANAGER_NAME}"
         printf "type: web\n"
@@ -375,11 +366,6 @@ function patch_moonraker_conf {
         return
     fi
     remove_update_manager_section "[update_manager mainsail]" "${tmp1}" "${tmp2}" || die "处理 Moonraker 配置段失败: [update_manager mainsail]"
-    if ! cp "${tmp2}" "${tmp1}"; then
-        warn "更新 Moonraker 临时配置失败，已跳过 update_manager 自动配置。"
-        return
-    fi
-    remove_update_manager_section "[update_manager klipper-toolchange-stats]" "${tmp1}" "${tmp2}" || die "处理 Moonraker 配置段失败: [update_manager klipper-toolchange-stats]"
     if ! cp "${tmp2}" "${tmp1}"; then
         warn "更新 Moonraker 临时配置失败，已跳过 update_manager 自动配置。"
         return

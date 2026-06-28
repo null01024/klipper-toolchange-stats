@@ -125,14 +125,14 @@ bash install.sh
 
 - 插件安装完成后，会自动调用 `install_toolchanger_stack.sh`。
 - 脚本会检查已有 Fluidd 前端，并安装 / 更新 `fluidd-toolchanger`。
-- 同时会更新 Moonraker 的 update_manager 配置。
+- 会更新 Moonraker 的 Fluidd 前端 update_manager 配置。
 
 输入 `2`：
 
 - 插件安装完成后，会自动调用 `install_toolchanger_stack.sh`。
 - 脚本会检查已有 Mainsail 前端，并安装 / 更新 `mainsail-toolchanger`。
 - 注意：Mainsail 版本维护可能不及时。
-- 同时会更新 Moonraker 的 update_manager 配置。
+- 会更新 Moonraker 的 Mainsail 前端 update_manager 配置。
 
 ### 换头方案
 
