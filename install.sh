@@ -1104,6 +1104,7 @@ function install_frontend_if_requested {
 
 printf "\n=========================================\n"
 echo "- Klipper multitool-stats 安装/更新脚本 -"
+echo "视频安装教程: https://www.bilibili.com/video/BV1dYTM6MEh2"
 printf "=========================================\n\n"
 
 preflight_checks
