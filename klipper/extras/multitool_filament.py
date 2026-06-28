@@ -186,6 +186,7 @@ class MultitoolFilament:
                 ch, '已装载' if self._loaded[ch] else '已卸载'))
         self.gcode.respond_info(
             "[耗材检查] 启动状态总览: %s" % ', '.join(lines))
+        self.multitool.sync_orca_lane_data_now()
 
     def _make_callback(self, channel):
         def _callback(eventtime, state):
@@ -198,6 +199,7 @@ class MultitoolFilament:
         action = '已装载' if loaded else '已卸载'
         self.gcode.run_script_from_command(
             "M118 通道%d，耗材%s" % (channel, action))
+        self.multitool.sync_orca_lane_data_now()
         # 断料续打触发判定：仅当
         #   - 启用了续打 (配置了 continuation_groups)
         #   - 该通道变为"已卸载"
@@ -587,6 +589,9 @@ class MultitoolFilament:
                    % (reason, channel))
             self.gcode.respond_info(msg)
             raise self.printer.command_error(msg)
+
+    def get_loaded_status(self):
+        return list(self._loaded)
 
     def _runout_status(self):
         tool = self._continue_tool

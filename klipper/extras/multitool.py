@@ -50,6 +50,7 @@ class Multitool:
         self.untool_unhomed_prepare = config.getboolean(
             'untool_unhomed_prepare', True)
         self.sync_active_spool = config.getboolean('sync_active_spool', True)
+        self.sync_orca_lane_data = True
         self.sync_active_extruder = config.getboolean(
             'sync_active_extruder', True)
         self.sync_extruder_motion = config.getboolean(
@@ -75,6 +76,8 @@ class Multitool:
         self.change_to_tool = -1
         self._spool_ids = [0] * self.tool_count
         self._spoolman_sync_warned = False
+        self._orca_lane_sync_warned = False
+        self._orca_lane_sync_last = 'disabled'
 
         # print_stats.state 单点轮询：子模块通过
         # register_print_state_listener 注册回调，避免各自重复轮询。
@@ -112,6 +115,8 @@ class Multitool:
             reactor.monotonic() + PRINT_STATE_POLL_S)
         if self.sync_active_spool:
             reactor.register_callback(self._sync_active_spool_event)
+        if self.sync_orca_lane_data:
+            reactor.register_callback(self._sync_orca_lane_data_event)
         if self.sync_active_extruder:
             reactor.register_callback(self._sync_active_extruder_event)
 
@@ -162,7 +167,8 @@ class Multitool:
         names = ['T%d' % i for i in range(self.tool_count)]
         names += [
             'UNTOOL', 'CHANGE_TOOL', 'SET_TOOL_SPOOL_ID', 'QUERY_TOOL_STATUS',
-            'MULTITOOL_SET_TEMPERATURE', 'MULTITOOL_WAIT_TEMPERATURE',
+            'SYNC_ORCA_LANE_DATA', 'MULTITOOL_SET_TEMPERATURE',
+            'MULTITOOL_WAIT_TEMPERATURE',
         ]
         existing = self.gcode.gcode_handlers
         conflicts = [n for n in names if n in existing]
@@ -193,6 +199,9 @@ class Multitool:
         self.gcode.register_command(
             'SET_TOOL_SPOOL_ID', self.cmd_SET_TOOL_SPOOL_ID,
             desc='设置工具通道的 Spoolman 料盘 ID')
+        self.gcode.register_command(
+            'SYNC_ORCA_LANE_DATA', self.cmd_SYNC_ORCA_LANE_DATA,
+            desc='手动刷新 OrcaSlicer lane_data 耗材同步数据')
         self.gcode.register_command(
             'MULTITOOL_SET_TEMPERATURE',
             self.cmd_MULTITOOL_SET_TEMPERATURE,
@@ -267,6 +276,10 @@ class Multitool:
             gcmd.respond_info(
                 "T%d Spoolman ID=%d" % (tool, self._spool_ids[tool]))
         gcmd.respond_info(
+            "Orca lane_data 同步: %s (last=%s)"
+            % ('开启' if self.sync_orca_lane_data else '关闭',
+               self._orca_lane_sync_last))
+        gcmd.respond_info(
             "回抽/补偿: length=%.3fmm F%.0f"
             % (self.extrude_compensation_length,
                self.extrude_compensation_speed))
@@ -284,6 +297,11 @@ class Multitool:
             gcmd.respond_info("[multitool] T%d 已清除 Spoolman 料盘关联" % tool)
         if tool == self.current_tool:
             self.on_tool_changed(tool)
+        self.sync_orca_lane_data_now()
+
+    def cmd_SYNC_ORCA_LANE_DATA(self, gcmd):
+        self.sync_orca_lane_data_now(force=True)
+        gcmd.respond_info("[multitool] 已请求刷新 Orca lane_data。")
 
     # ------------------------------------------------------------------
     # 主流程：换热端
@@ -514,6 +532,9 @@ class Multitool:
     def _sync_active_spool_event(self, _eventtime):
         self.on_tool_changed(self.current_tool)
 
+    def _sync_orca_lane_data_event(self, _eventtime):
+        self.sync_orca_lane_data_now()
+
     def _sync_active_extruder_event(self, _eventtime):
         self._sync_active_extruder(self.current_tool)
 
@@ -705,6 +726,7 @@ class Multitool:
 
     def on_tool_changed(self, tool):
         if not self.sync_active_spool:
+            self.sync_orca_lane_data_now()
             return
         spool_id = None
         if 0 <= tool < self.tool_count:
@@ -712,6 +734,46 @@ class Multitool:
             if mapped_id > 0:
                 spool_id = mapped_id
         self._set_spoolman_active_spool(spool_id)
+        self.sync_orca_lane_data_now()
+
+    def sync_orca_lane_data_now(self, force=False):
+        if not self.sync_orca_lane_data and not force:
+            self._orca_lane_sync_last = 'disabled'
+            return
+        webhooks = self.printer.lookup_object('webhooks', None)
+        if webhooks is None:
+            self._orca_lane_sync_last = 'webhooks unavailable'
+            if not self._orca_lane_sync_warned:
+                self._orca_lane_sync_warned = True
+                self.gcode.respond_info(
+                    "[multitool] 无法刷新 Orca lane_data：webhooks 不可用。")
+            return
+        loaded = [None] * self.tool_count
+        filament = self.printer.lookup_object('multitool_filament', None)
+        if filament is not None:
+            try:
+                loaded = filament.get_loaded_status()
+            except Exception:
+                logging.exception(
+                    "multitool: failed to read filament loaded status")
+                loaded = [None] * self.tool_count
+        try:
+            webhooks.call_remote_method(
+                'multitool_lane_data_update',
+                tool_count=self.tool_count,
+                spool_ids=list(self._spool_ids),
+                loaded=loaded,
+                current_tool=self.current_tool)
+            self._orca_lane_sync_last = 'requested'
+        except Exception:
+            logging.exception("multitool: failed to request Orca lane sync")
+            self._orca_lane_sync_last = 'unavailable'
+            if not self._orca_lane_sync_warned:
+                self._orca_lane_sync_warned = True
+                self.gcode.respond_info(
+                    "[multitool] 无法刷新 Orca lane_data；"
+                    "如需 Orca 耗材同步，请确认 Moonraker 已启用 "
+                    "[multitool_lane_data]。")
 
     def _set_spoolman_active_spool(self, spool_id):
         webhooks = self.printer.lookup_object('webhooks', None)
@@ -789,6 +851,8 @@ class Multitool:
             'tools': ['T%d' % i for i in range(self.tool_count)],
             'spool_ids': list(self._spool_ids),
             'sync_active_spool': self.sync_active_spool,
+            'sync_orca_lane_data': self.sync_orca_lane_data,
+            'orca_lane_sync_last': self._orca_lane_sync_last,
             'sync_active_extruder': self.sync_active_extruder,
             'sync_extruder_motion': self.sync_extruder_motion,
             'extruder_motion_sync_stepper':
