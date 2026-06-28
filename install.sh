@@ -842,8 +842,8 @@ function patch_cxchanger_config_tool_count {
                 ykey = "variable_t" i "_dock_y"
                 xval = (xkey in values) ? values[xkey] : "0"
                 yval = (ykey in values) ? values[ykey] : "0"
-                printf "%s: %s               # 【必改】T%d 停靠坞中心 X 坐标\n", xkey, xval, i
-                printf "%s: %s               # 【必改】T%d 停靠坞中心 Y 坐标\n", ykey, yval, i
+                printf "%s: %s               # 【必改】T%d 停靠坞 X 坐标\n", xkey, xval, i
+                printf "%s: %s               # 【必改】T%d 停靠坞 Y 坐标\n", ykey, yval, i
             }
         }
         NR == FNR {
