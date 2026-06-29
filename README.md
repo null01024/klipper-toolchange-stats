@@ -387,7 +387,7 @@ gcode:
 ```ini
 step_pin: toolhead:STEP
 pin: mcu:DOCK_FAN
-x_diag_pin: ^mcu:X_DIAG
+diag_pin: ^mcu:X_DIAG
 ```
 
 那就需要在对应 `[board_pins]` 里定义 `STEP`、`DOCK_FAN`、`X_DIAG`。
@@ -658,6 +658,8 @@ QUERY_CLAMP_STATUS
 QUERY_XY_GUARD_STATUS
 ```
 
+XY 防撞检测使用 TMC2209 StallGuard/DIAG：在 `[tmc2209 stepper_x/y]` 中配置 `diag_pin`，`[multitool_xy_guard]` 只引用 `x_tmc` / `y_tmc`。插件不会把 DIAG pin 当普通输入重复注册，也不会把 X/Y endstop 改成无感归零；它只在换头检测窗口内轮询 TMC 的 `IOIN.diag`，用来判断换热端过程中是否发生过大力度撞击。低速测试时请确认撞击后能变为 `PRESSED` 或记录最近触发。
+
 然后低速测试：
 
 ```gcode
@@ -686,6 +688,37 @@ QUERY_TOOL_STATUS
 | `QUERY_XY_GUARD_STATUS` | 查询 XY 防撞检测 |
 | `CALIBRATE_TOOL TOOL=0` | 校准单个工具 |
 | `CALIBRATE_ALL_TOOLS` | 校准全部工具 |
+
+## LIS2DW12TR-HXY 加速度计
+
+本仓库提供独立的 `[lis2dw_hxy]` Klipper extras 模块，用于华轩阳/HXY 资料中 `WHO_AM_I = 0x11` 的 LIS2DW12TR-HXY 兼容加速度计。安装脚本会和其它 `klipper/extras/*.py` 一样把它软链到 Klipper。
+
+I2C 接线示例：
+
+```ini
+[lis2dw_hxy]
+i2c_address: 25
+i2c_mcu: toolhead
+i2c_speed: 400000
+i2c_software_scl_pin: toolhead:YOUR_SCL
+i2c_software_sda_pin: toolhead:YOUR_SDA
+axes_map: -y,-z,x
+
+[resonance_tester]
+accel_chip: lis2dw_hxy
+accel_per_hz: 50
+probe_points: 150, 150, 20
+```
+
+SPI 接线时改用 `cs_pin` 和 `spi_*` 配置。HXY 资料中 SDO 悬空/高电平时 I2C 地址为 `0x19`，即 Klipper 配置里的 `25`；SDO 拉低时地址为 `0x18`，即 `24`。
+
+启用后先验证：
+
+```gcode
+ACCELEROMETER_QUERY CHIP=lis2dw_hxy
+```
+
+如果报 `Invalid lis2dw_hxy id (got xx vs 11)`，优先检查焊接、CS/I2C 模式、电源、SCL/SDA 或 SPI 引脚、I2C 地址。
 
 ## 常见问题
 
@@ -769,7 +802,8 @@ klipper-toolchange-stats/
     ├── multitool_clamp.py
     ├── multitool_xy_guard.py
     ├── multitool_stats.py
-    └── multitool_filament.py
+    ├── multitool_filament.py
+    └── lis2dw_hxy.py
 ```
 
 ## 许可证
