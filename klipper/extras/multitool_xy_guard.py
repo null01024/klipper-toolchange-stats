@@ -3,11 +3,13 @@
 #
 # 职责：
 #   - 监听 X/Y TMC DIAG 状态
-#   - 仅在换热端 release / pickup 钩子运行期间记录 DIAG 触发
+#   - 在换热端 release / pickup 钩子前后读取 DIAG 状态
 #   - 提供 assert_ok(reason) 给主流程用 command_error 中断当前换头
 #
 # 约定：
 #   - 直接读取 [tmc2209 stepper_x/y] 的 IOIN.diag
+#   - TMC UART 读取会等待 MCU 返回，只能在 gcode 命令上下文执行；
+#     不要在 klippy:ready 或 reactor timer callback 中读取寄存器。
 #   - StallGuard 阈值由 [tmc* stepper_x/y] 的驱动参数设置
 
 import logging
@@ -40,7 +42,6 @@ class MultitoolXYGuard:
         self._last_stage = None
         self._last_time = None
         self._last_tool = -1
-        self._poll_timer = None
         self._tmc_error = None
         self._tmc_restore = {}
         self._action_sent = False
@@ -71,7 +72,6 @@ class MultitoolXYGuard:
             'X': self._lookup_tmc('X', self.x_tmc_name),
             'Y': self._lookup_tmc('Y', self.y_tmc_name),
         }
-        self._sample_tmc()
 
     def _lookup_tmc(self, axis, name):
         obj = self.printer.lookup_object(name, None)
@@ -178,32 +178,13 @@ class MultitoolXYGuard:
             if self._armed and pressed and self._fault_axis is None:
                 self._set_fault(axis, eventtime)
 
-    def _poll_tmc(self, eventtime):
-        try:
-            self._sample_tmc()
-        except Exception as e:
-            self._tmc_error = str(e)
-            logging.exception("multitool_xy_guard: TMC DIAG 查询失败")
-            return self.reactor.NEVER
-        if not self._armed:
-            return self.reactor.NEVER
-        return eventtime + self.poll_ms / 1000.
-
-    def _start_tmc_poll(self):
+    def _start_tmc_window(self):
         self._tmc_error = None
         self._action_sent = False
-        if self._poll_timer is not None:
-            self.reactor.unregister_timer(self._poll_timer)
-            self._poll_timer = None
         self._prepare_tmc_stallguard()
         self._sample_tmc()
-        self._poll_timer = self.reactor.register_timer(
-            self._poll_tmc, self.reactor.monotonic() + self.poll_ms / 1000.)
 
-    def _stop_tmc_poll(self):
-        if self._poll_timer is not None:
-            self.reactor.unregister_timer(self._poll_timer)
-            self._poll_timer = None
+    def _stop_tmc_window(self):
         self._restore_tmc_stallguard()
 
     def arm(self, stage):
@@ -215,10 +196,10 @@ class MultitoolXYGuard:
         self._fault_tool = -1
 
         try:
-            self._start_tmc_poll()
+            self._start_tmc_window()
         except Exception:
             self._armed = False
-            self._stop_tmc_poll()
+            self._stop_tmc_window()
             raise
         eventtime = self.reactor.monotonic()
         for axis in ('X', 'Y'):
@@ -233,7 +214,7 @@ class MultitoolXYGuard:
         self._fault_stage = None
         self._fault_time = None
         self._fault_tool = -1
-        self._stop_tmc_poll()
+        self._stop_tmc_window()
 
     def assert_ok(self, reason=''):
         self.gcode.run_script_from_command("M400")
@@ -264,10 +245,16 @@ class MultitoolXYGuard:
         return 'PRESSED' if raw else 'RELEASED'
 
     def cmd_QUERY_XY_GUARD_STATUS(self, gcmd):
+        if self._tmc:
+            try:
+                self._sample_tmc()
+            except Exception as e:
+                self._tmc_error = str(e)
+                logging.exception("multitool_xy_guard: TMC DIAG 查询失败")
         gcmd.respond_info("====== XY 防撞检测状态 ======")
         gcmd.respond_info("启用: 是")
         gcmd.respond_info(
-            "TMC: X=%s Y=%s poll=%dms action=%s"
+            "TMC: X=%s Y=%s mode=gcode-snapshot poll=%dms action=%s"
             % (self.x_tmc_name, self.y_tmc_name,
                self.poll_ms, self.action))
         gcmd.respond_info("当前检测窗口: %s"
@@ -275,6 +262,8 @@ class MultitoolXYGuard:
         gcmd.respond_info(
             "当前 DIAG: X=%s Y=%s"
             % (self._raw_text('X'), self._raw_text('Y')))
+        if self._tmc_error is not None:
+            gcmd.respond_info("最近 TMC 查询错误: %s" % self._tmc_error)
         if self._last_axis is None:
             gcmd.respond_info("最近触发: 无")
         else:
