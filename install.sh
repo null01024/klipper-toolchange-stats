@@ -1025,7 +1025,7 @@ function ask_tool_calibration_scheme {
     while true; do
         cat <<EOF
 请选择对刀方案：
-  0) 无对刀：不安装对刀插件，不部署对刀配置。（不对刀玩多热端？？）
+  0) 肉眼对刀：不安装对刀插件，不部署对刀配置。（肉眼对刀？？？）
   1) 微动对刀：安装 tools_calibrate.py，并部署 calibration.cfg。（https://github.com/viesturz/klipper-toolchanger/blob/main/tools_calibrate.md）
   2) 涡流对刀：安装 tool_eddy_calibration.py，并部署 calibration-eddy.cfg。（https://github.com/chengxg/tool_eddy_calibration）
 
