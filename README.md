@@ -652,14 +652,6 @@ QUERY_FILAMENT_STATUS
 QUERY_CLAMP_STATUS
 ```
 
-如果启用了 XY 防撞检测：
-
-```gcode
-QUERY_XY_GUARD_STATUS
-```
-
-XY 防撞检测使用 TMC2209 StallGuard/DIAG：在 `[tmc2209 stepper_x/y]` 中配置 `diag_pin`，`[multitool_xy_guard]` 只引用 `x_tmc` / `y_tmc`。插件会从 TMC 配置段读取 DIAG pin，并通过 Klipper buttons helper 监听 MCU 输入事件；检测窗口内会临时切到 spreadCycle、关闭 stealthChop 阈值并打开 `TCOOLTHRS`。这样 DIAG 的瞬时触发会被记录下来，不再依赖事后通过 UART 读取 `IOIN.diag` 快照。低速测试时请确认撞击后 `QUERY_XY_GUARD_STATUS` 会显示最近触发。
-
 然后低速测试：
 
 ```gcode
@@ -685,7 +677,6 @@ QUERY_TOOL_STATUS
 | `QUERY_FILAMENT_STATUS` | 查询耗材状态 |
 | `CHECK_PRINT_FILAMENT TOOLS=0,1` | 打印前检查耗材 |
 | `QUERY_CLAMP_STATUS` | 查询夹紧开关 |
-| `QUERY_XY_GUARD_STATUS` | 查询 XY 防撞检测 |
 | `CALIBRATE_TOOL TOOL=0` | 校准单个工具 |
 | `CALIBRATE_ALL_TOOLS` | 校准全部工具 |
 
@@ -769,7 +760,6 @@ klipper-toolchange-stats/
     ├── multitool.py
     ├── multitool_offsets.py
     ├── multitool_clamp.py
-    ├── multitool_xy_guard.py
     ├── multitool_stats.py
     └── multitool_filament.py
 ```
