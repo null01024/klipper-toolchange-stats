@@ -658,7 +658,7 @@ QUERY_CLAMP_STATUS
 QUERY_XY_GUARD_STATUS
 ```
 
-XY 防撞检测使用 TMC2209 StallGuard/DIAG：在 `[tmc2209 stepper_x/y]` 中配置 `diag_pin`，`[multitool_xy_guard]` 只引用 `x_tmc` / `y_tmc`。插件不会把 DIAG pin 当普通输入重复注册，也不会把 X/Y endstop 改成无感归零；检测窗口内会临时切到 spreadCycle、关闭 stealthChop 阈值并打开 `TCOOLTHRS`，然后只在 gcode 命令上下文读取 TMC 的 `IOIN.diag`，避免在 Klipper ready callback 或 reactor timer callback 中等待 MCU 返回。低速测试时请确认撞击后执行 `QUERY_XY_GUARD_STATUS` 能变为 `PRESSED`，或换头流程能在前后检查中记录最近触发。
+XY 防撞检测使用 TMC2209 StallGuard/DIAG：在 `[tmc2209 stepper_x/y]` 中配置 `diag_pin`，`[multitool_xy_guard]` 只引用 `x_tmc` / `y_tmc`。插件会从 TMC 配置段读取 DIAG pin，并通过 Klipper buttons helper 监听 MCU 输入事件；检测窗口内会临时切到 spreadCycle、关闭 stealthChop 阈值并打开 `TCOOLTHRS`。这样 DIAG 的瞬时触发会被记录下来，不再依赖事后通过 UART 读取 `IOIN.diag` 快照。低速测试时请确认撞击后 `QUERY_XY_GUARD_STATUS` 会显示最近触发。
 
 然后低速测试：
 

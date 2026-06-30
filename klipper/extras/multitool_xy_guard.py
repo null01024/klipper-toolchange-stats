@@ -2,14 +2,13 @@
 # Klipper Multitool - XY 防撞检测子模块
 #
 # 职责：
-#   - 监听 X/Y TMC DIAG 状态
-#   - 在换热端 release / pickup 钩子前后读取 DIAG 状态
+#   - 用 buttons helper 监听 X/Y TMC DIAG pin 电平变化
+#   - 仅在换热端 release / pickup 钩子运行期间记录 DIAG 触发
 #   - 提供 assert_ok(reason) 给主流程用 command_error 中断当前换头
 #
 # 约定：
-#   - 直接读取 [tmc2209 stepper_x/y] 的 IOIN.diag
-#   - TMC UART 读取会等待 MCU 返回，只能在 gcode 命令上下文执行；
-#     不要在 klippy:ready 或 reactor timer callback 中读取寄存器。
+#   - 从 [tmc2209 stepper_x/y] 读取 diag_pin，并注册为 MCU 输入事件
+#   - TMC UART 只用于检测窗口内临时设置 / 恢复 StallGuard 相关寄存器
 #   - StallGuard 阈值由 [tmc* stepper_x/y] 的驱动参数设置
 
 import logging
@@ -23,8 +22,10 @@ class MultitoolXYGuard:
 
         self.x_tmc_name = config.get('x_tmc', 'tmc2209 stepper_x')
         self.y_tmc_name = config.get('y_tmc', 'tmc2209 stepper_y')
-        self._validate_tmc_config(config, 'X', self.x_tmc_name)
-        self._validate_tmc_config(config, 'Y', self.y_tmc_name)
+        self.x_diag_pin = self._validate_tmc_config(
+            config, 'X', self.x_tmc_name)
+        self.y_diag_pin = self._validate_tmc_config(
+            config, 'Y', self.y_tmc_name)
         self.settle_ms = config.getint('settle_ms', 20, minval=0)
         self.poll_ms = config.getint('poll_ms', 20, minval=5)
         self.action = config.get('action', 'pause')
@@ -45,8 +46,12 @@ class MultitoolXYGuard:
         self._tmc_error = None
         self._tmc_restore = {}
         self._action_sent = False
-        self._raw = {'X': False, 'Y': False}
+        self._raw = {'X': None, 'Y': None}
         self._tmc = {}
+
+        buttons = self.printer.load_object(config, 'buttons')
+        buttons.register_buttons([self.x_diag_pin], self._make_callback('X'))
+        buttons.register_buttons([self.y_diag_pin], self._make_callback('Y'))
 
         self.printer.register_event_handler('klippy:ready', self._on_ready)
 
@@ -60,12 +65,14 @@ class MultitoolXYGuard:
                 "multitool_xy_guard: 未找到 %s 轴 TMC 配置段 [%s]"
                 % (axis, name))
         tmc_config = config.getsection(name)
-        if tmc_config.get('diag_pin', None) is None:
+        diag_pin = tmc_config.get('diag_pin', None)
+        if diag_pin is None:
             raise config.error(
                 "multitool_xy_guard: [%s] 必须配置 diag_pin" % (name,))
         if tmc_config.get('driver_SGTHRS', None) is None:
             raise config.error(
                 "multitool_xy_guard: [%s] 必须配置 driver_SGTHRS" % (name,))
+        return diag_pin
 
     def _on_ready(self):
         self._tmc = {
@@ -84,11 +91,19 @@ class MultitoolXYGuard:
         if mcu_tmc is None or fields is None:
             raise self.printer.config_error(
                 "multitool_xy_guard: [%s] 不暴露 mcu_tmc/fields，"
-                "无法读取 IOIN.diag" % (name,))
-        if fields.lookup_register('diag', None) != 'IOIN':
-            raise self.printer.config_error(
-                "multitool_xy_guard: [%s] 不支持 IOIN.diag" % (name,))
+                "无法设置 StallGuard 寄存器" % (name,))
         return {'name': name, 'obj': obj, 'mcu_tmc': mcu_tmc, 'fields': fields}
+
+    def _make_callback(self, axis):
+        def _callback(eventtime, state):
+            self._on_diag_button(eventtime, axis, state)
+        return _callback
+
+    def _on_diag_button(self, eventtime, axis, state):
+        pressed = bool(state)
+        self._raw[axis] = pressed
+        if self._armed and pressed and self._fault_axis is None:
+            self._set_fault(axis, eventtime)
 
     def _set_fault(self, axis, eventtime):
         self._fault_axis = axis
@@ -120,6 +135,10 @@ class MultitoolXYGuard:
             return
         self._action_sent = True
         msg = self._fault_text('StallGuard触发')
+        self.reactor.register_callback(
+            lambda eventtime: self._run_fault_action(eventtime, msg))
+
+    def _run_fault_action(self, _eventtime, msg):
         self.gcode.respond_info(msg)
         if self.action == 'pause':
             try:
@@ -131,11 +150,6 @@ class MultitoolXYGuard:
     # ------------------------------------------------------------------
     # 公共方法：被 multitool 主流程调用
     # ------------------------------------------------------------------
-    def _read_tmc_diag(self, axis):
-        info = self._tmc[axis]
-        reg = info['mcu_tmc'].get_register('IOIN')
-        return bool(info['fields'].get_field('diag', reg, 'IOIN'))
-
     def _set_tmc_field(self, axis, field_name, value):
         info = self._tmc[axis]
         fields = info['fields']
@@ -173,19 +187,10 @@ class MultitoolXYGuard:
             info['mcu_tmc'].set_register(reg_name, reg_val)
         self._tmc_restore = {}
 
-    def _sample_tmc(self):
-        eventtime = self.reactor.monotonic()
-        for axis in ('X', 'Y'):
-            pressed = self._read_tmc_diag(axis)
-            self._raw[axis] = pressed
-            if self._armed and pressed and self._fault_axis is None:
-                self._set_fault(axis, eventtime)
-
     def _start_tmc_window(self):
         self._tmc_error = None
         self._action_sent = False
         self._prepare_tmc_stallguard()
-        self._sample_tmc()
 
     def _stop_tmc_window(self):
         self._restore_tmc_stallguard()
@@ -221,12 +226,8 @@ class MultitoolXYGuard:
 
     def assert_ok(self, reason=''):
         self.gcode.run_script_from_command("M400")
-        try:
-            self._sample_tmc()
-        except Exception as e:
-            self._tmc_error = str(e)
         if self._tmc_error is not None:
-            msg = ("XY 防撞检测失败 (原因=%s) TMC DIAG 查询错误: %s"
+            msg = ("XY 防撞检测失败 (原因=%s) TMC StallGuard 设置错误: %s"
                    % (reason, self._tmc_error))
             self.gcode.respond_info(msg)
             raise self.printer.command_error(msg)
@@ -245,28 +246,26 @@ class MultitoolXYGuard:
     # ------------------------------------------------------------------
     def _raw_text(self, axis):
         raw = self._raw[axis]
+        if raw is None:
+            return 'UNKNOWN'
         return 'PRESSED' if raw else 'RELEASED'
 
     def cmd_QUERY_XY_GUARD_STATUS(self, gcmd):
-        if self._tmc:
-            try:
-                self._sample_tmc()
-            except Exception as e:
-                self._tmc_error = str(e)
-                logging.exception("multitool_xy_guard: TMC DIAG 查询失败")
         gcmd.respond_info("====== XY 防撞检测状态 ======")
         gcmd.respond_info("启用: 是")
         gcmd.respond_info(
-            "TMC: X=%s Y=%s mode=gcode-snapshot poll=%dms action=%s"
+            "TMC: X=%s Y=%s mode=diag-pin-event action=%s"
             % (self.x_tmc_name, self.y_tmc_name,
-               self.poll_ms, self.action))
+               self.action))
+        gcmd.respond_info(
+            "DIAG pin: X=%s Y=%s" % (self.x_diag_pin, self.y_diag_pin))
         gcmd.respond_info("当前检测窗口: %s"
                           % (self._stage if self._armed else "未启用"))
         gcmd.respond_info(
             "当前 DIAG: X=%s Y=%s"
             % (self._raw_text('X'), self._raw_text('Y')))
         if self._tmc_error is not None:
-            gcmd.respond_info("最近 TMC 查询错误: %s" % self._tmc_error)
+            gcmd.respond_info("最近 TMC 设置错误: %s" % self._tmc_error)
         if self._last_axis is None:
             gcmd.respond_info("最近触发: 无")
         else:
