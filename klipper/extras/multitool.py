@@ -10,7 +10,6 @@
 #   - multitool_clamp   : 钩子前后置自动调用 assert_state
 #   - multitool_offsets : 切换完成后调用 apply()
 #   - multitool_stats   : 全流程嵌入计时
-#   - multitool_xy_guard: release/pickup 钩子期间监听 XY DIAG
 #
 # 用户必须实现两个宏：
 #   [gcode_macro multitool_release_tool]   入参 TOOL=<int>
@@ -352,7 +351,6 @@ class Multitool:
         clamp = self.printer.lookup_object('multitool_clamp', None)
         offsets = self.printer.lookup_object('multitool_offsets', None)
         stats = self.printer.lookup_object('multitool_stats', None)
-        xy_guard = self.printer.lookup_object('multitool_xy_guard', None)
 
         # 备份 accel；try/finally 保证恢复
         toolhead = self.printer.lookup_object('toolhead')
@@ -399,17 +397,7 @@ class Multitool:
                     self.extrude_compensation_speed, '释放前回抽')
                 if stats is not None:
                     stats.stage_begin('release')
-                if xy_guard is not None:
-                    xy_guard.arm('release')
-                try:
-                    if xy_guard is not None:
-                        xy_guard.assert_ok('释放热端过程')
-                    self._invoke_hook('multitool_release_tool', old_tool)
-                    if xy_guard is not None:
-                        xy_guard.assert_ok('释放热端过程')
-                finally:
-                    if xy_guard is not None:
-                        xy_guard.disarm()
+                self._invoke_hook('multitool_release_tool', old_tool)
                 if stats is not None:
                     stats.stage_end('release')
                 if clamp is not None:
@@ -423,17 +411,7 @@ class Multitool:
                 self._sync_active_extruder(new_tool)
                 if stats is not None:
                     stats.stage_begin('pickup')
-                if xy_guard is not None:
-                    xy_guard.arm('pickup')
-                try:
-                    if xy_guard is not None:
-                        xy_guard.assert_ok('抓取热端过程')
-                    self._invoke_hook('multitool_pickup_tool', new_tool)
-                    if xy_guard is not None:
-                        xy_guard.assert_ok('抓取热端过程')
-                finally:
-                    if xy_guard is not None:
-                        xy_guard.disarm()
+                self._invoke_hook('multitool_pickup_tool', new_tool)
                 if stats is not None:
                     stats.stage_end('pickup')
                 if clamp is not None:
