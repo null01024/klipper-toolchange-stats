@@ -141,18 +141,21 @@ class MultitoolXYGuard:
         fields = info['fields']
         reg_name = fields.lookup_register(field_name, None)
         if reg_name is None:
-            return
+            return False
         key = (axis, field_name)
         if key not in self._tmc_restore:
             self._tmc_restore[key] = fields.get_field(field_name)
         reg_val = fields.set_field(field_name, value)
         info['mcu_tmc'].set_register(reg_name, reg_val)
+        return True
 
     def _prepare_tmc_stallguard(self):
         self._tmc_restore = {}
         for axis in ('X', 'Y'):
             # TMC2209 StallGuard 需要 spreadCycle，且 TCOOLTHRS 非 0 才会工作。
+            self._set_tmc_field(axis, 'en_spreadcycle', 1)
             self._set_tmc_field(axis, 'en_pwm_mode', 0)
+            self._set_tmc_field(axis, 'tpwmthrs', 0)
             self._set_tmc_field(axis, 'tcoolthrs', 0xfffff)
             self._set_tmc_field(axis, 'thigh', 0)
 
