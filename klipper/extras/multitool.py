@@ -736,12 +736,15 @@ class Multitool:
                     "multitool: failed to read filament loaded status")
                 loaded = [None] * self.tool_count
         try:
+            rgb_enabled = (
+                self.printer.lookup_object('multitool_rgb', None) is not None)
             webhooks.call_remote_method(
                 'multitool_lane_data_update',
                 tool_count=self.tool_count,
                 spool_ids=list(self._spool_ids),
                 loaded=loaded,
-                current_tool=self.current_tool)
+                current_tool=self.current_tool,
+                rgb_enabled=rgb_enabled)
             self._orca_lane_sync_last = 'requested'
         except Exception:
             logging.exception("multitool: failed to request Orca lane sync")
