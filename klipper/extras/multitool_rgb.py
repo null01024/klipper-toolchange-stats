@@ -8,10 +8,18 @@ import logging
 import math
 import re
 
+DEFAULT_LED_NAME = 'multitool_rgb'
 RGB_COLOR_VAR_TMPL = 'tool_%d_rgb_color'
 ANIM_INTERVAL_S = 0.20
-SUPPORTED_EFFECTS = (
-    'solid', 'breathe', 'chase', 'amber_pulse', 'red_flash', 'off')
+DEFAULT_EFFECTS = {
+    'idle': 'solid',
+    'printing': 'solid',
+    'changing': 'chase',
+    'heating': 'breathe',
+    'paused': 'amber_pulse',
+    'runout': 'red_flash',
+    'error': 'red_flash',
+}
 PRINTING_STATES = ('printing',)
 PAUSED_STATES = ('paused',)
 ERROR_STATES = ('error',)
@@ -25,11 +33,16 @@ class MultitoolRgb:
         self.multitool = self.printer.load_object(config, 'multitool')
         self.tool_count = self.multitool.tool_count
 
-        self.led = config.get('led').strip()
-        if not self.led:
-            raise config.error("[multitool_rgb] led 不能为空。")
+        if config.get('led', None) is not None:
+            raise config.error(
+                "[multitool_rgb] 已不再支持 led；请直接在 "
+                "[multitool_rgb] 中配置 pin。")
+        self.led = DEFAULT_LED_NAME
+        self._internal_led = self._setup_neopixel(config)
         self.led_indices = self._parse_int_list(
             config.get('led_indices', ''), 'led_indices')
+        if not self.led_indices:
+            self.led_indices = list(range(1, self.tool_count + 1))
         if len(self.led_indices) != self.tool_count:
             raise config.error(
                 "[multitool_rgb] led_indices 数量必须等于 [multitool] "
@@ -50,6 +63,7 @@ class MultitoolRgb:
         self.spoolman_colors = config.getboolean('spoolman_colors', True)
         self.off_when_disabled = config.getboolean(
             'off_when_disabled', True)
+        self.effects_enabled = config.getboolean('effects', True)
 
         self.fallback_colors = self._parse_colors(
             config.get('fallback_colors', ''), 'fallback_colors')
@@ -60,16 +74,6 @@ class MultitoolRgb:
                 self.fallback_colors[len(self.fallback_colors)
                                      % len(self.fallback_colors)])
         self.fallback_colors = self.fallback_colors[:self.tool_count]
-
-        self.effects = {
-            'idle': self._effect(config, 'idle_effect', 'solid'),
-            'printing': self._effect(config, 'printing_effect', 'solid'),
-            'changing': self._effect(config, 'changing_effect', 'chase'),
-            'heating': self._effect(config, 'heating_effect', 'breathe'),
-            'paused': self._effect(config, 'paused_effect', 'amber_pulse'),
-            'runout': self._effect(config, 'runout_effect', 'red_flash'),
-            'error': self._effect(config, 'error_effect', 'red_flash'),
-        }
 
         self.enabled = True
         self.print_state = None
@@ -84,6 +88,22 @@ class MultitoolRgb:
 
         self.printer.register_event_handler('klippy:connect', self._on_connect)
         self.printer.register_event_handler('klippy:ready', self._on_ready)
+
+    def _setup_neopixel(self, config):
+        if config.get('pin', None) is None:
+            raise config.error("[multitool_rgb] pin 不能为空。")
+        try:
+            import neopixel
+        except ImportError:
+            raise config.error(
+                "[multitool_rgb] 无法加载 Klipper neopixel 模块。")
+        led_config = _NeopixelConfigProxy(config, self.led, self.tool_count)
+        if hasattr(neopixel, 'load_config_prefix'):
+            led_obj = neopixel.load_config_prefix(led_config)
+        else:
+            led_obj = neopixel.PrinterNeoPixel(led_config)
+        self.printer.add_object('neopixel %s' % self.led, led_obj)
+        return led_obj
 
     def _parse_int_list(self, raw, name):
         values = []
@@ -132,14 +152,6 @@ class MultitoolRgb:
         )
         return [self._parse_color(palette[i % len(palette)], 'default')
                 for i in range(count)]
-
-    def _effect(self, config, key, default):
-        value = config.get(key, default).strip().lower()
-        if value not in SUPPORTED_EFFECTS:
-            raise config.error(
-                "[multitool_rgb] %s=%s 不支持，可用值: %s"
-                % (key, value, ', '.join(SUPPORTED_EFFECTS)))
-        return value
 
     def _on_connect(self):
         existing = self.gcode.gcode_handlers
@@ -281,20 +293,11 @@ class MultitoolRgb:
         if self._led_checked:
             return self._led_available
         self._led_checked = True
-        # SET_LED works with several LED object types.  This check catches
-        # obvious typos early without requiring a specific LED implementation.
-        found = False
-        for prefix in ('neopixel', 'dotstar', 'led', 'pca9533', 'pca9632'):
-            if self.printer.lookup_object('%s %s' % (prefix, self.led),
-                                          None) is not None:
-                found = True
-                break
-        if not found:
+        if self._lookup_led_object() is None:
             self._led_available = False
             self.gcode.respond_info(
-                "[multitool_rgb] 未找到 LED 对象 %s；请确认已配置 "
-                "[neopixel %s] 或其他 Klipper LED section。"
-                % (self.led, self.led))
+                "[multitool_rgb] 未找到内部 neopixel 对象 %s。"
+                % self.led)
             return self._led_available
         led_obj = self._lookup_led_object()
         try:
@@ -313,12 +316,7 @@ class MultitoolRgb:
         return self._led_available
 
     def _lookup_led_object(self):
-        for prefix in ('neopixel', 'dotstar', 'led', 'pca9533', 'pca9632'):
-            obj = self.printer.lookup_object('%s %s' % (prefix, self.led),
-                                             None)
-            if obj is not None:
-                return obj
-        return None
+        return self.printer.lookup_object('neopixel %s' % self.led, None)
 
     def _frame_colors(self):
         mode, effect = self._mode_and_effect()
@@ -334,18 +332,23 @@ class MultitoolRgb:
     def _mode_and_effect(self):
         runout = self._runout_status()
         if runout.get('active'):
-            return 'runout', self.effects['runout']
+            return 'runout', self._effect_for_mode('runout')
         if self.print_state in ERROR_STATES:
-            return 'error', self.effects['error']
+            return 'error', self._effect_for_mode('error')
         if self.print_state in PAUSED_STATES:
-            return 'paused', self.effects['paused']
+            return 'paused', self._effect_for_mode('paused')
         if self.multitool.active:
-            return 'changing', self.effects['changing']
+            return 'changing', self._effect_for_mode('changing')
         if self._heating_tool() >= 0:
-            return 'heating', self.effects['heating']
+            return 'heating', self._effect_for_mode('heating')
         if self.print_state in PRINTING_STATES:
-            return 'printing', self.effects['printing']
-        return 'idle', self.effects['idle']
+            return 'printing', self._effect_for_mode('printing')
+        return 'idle', self._effect_for_mode('idle')
+
+    def _effect_for_mode(self, mode):
+        if not self.effects_enabled:
+            return 'solid'
+        return DEFAULT_EFFECTS.get(mode, 'solid')
 
     def _tool_color(self, tool, mode, effect):
         loaded = self._loaded(tool)
@@ -359,16 +362,24 @@ class MultitoolRgb:
             runout = self._runout_status()
             rtool = runout.get('tool', -1)
             if tool == rtool:
-                return self._flash((1., 0., 0.), self.brightness)
+                if self.effects_enabled:
+                    return self._flash((1., 0., 0.), self.brightness)
+                return self._scale((1., 0., 0.), self.brightness)
             if tool == target and target >= 0:
+                if not self.effects_enabled:
+                    return self._scale(base, self.brightness)
                 return self._breathe(base, self.dim_brightness,
                                      self.brightness)
             return self._scale(base, self.dim_brightness)
         if mode == 'error':
-            return self._flash((1., 0., 0.), self.brightness)
+            if self.effects_enabled:
+                return self._flash((1., 0., 0.), self.brightness)
+            return self._scale((1., 0., 0.), self.brightness)
         if mode == 'paused':
             level = self.brightness if tool == current else self.dim_brightness
-            return self._pulse((1., 0.55, 0.05), level)
+            if self.effects_enabled:
+                return self._pulse((1., 0.55, 0.05), level)
+            return self._scale((1., 0.55, 0.05), level)
         if mode == 'changing':
             if effect == 'chase':
                 return self._chase_color(tool, base)
@@ -377,6 +388,8 @@ class MultitoolRgb:
         if mode == 'heating':
             htool = self._heating_tool()
             if tool == htool:
+                if not self.effects_enabled:
+                    return self._scale(base, self.brightness)
                 return self._breathe(base, self.dim_brightness,
                                      self.brightness)
             return self._scale(base, self.dim_brightness)
@@ -501,6 +514,7 @@ class MultitoolRgb:
             'led': self.led,
             'led_indices': list(self.led_indices),
             'brightness': self.brightness,
+            'effects': self.effects_enabled,
             'mode': mode,
             'effect': effect,
             'colors': [self._color_hex(self._base_color(i))
@@ -512,3 +526,26 @@ class MultitoolRgb:
 
 def load_config(config):
     return MultitoolRgb(config)
+
+
+class _NeopixelConfigProxy:
+    def __init__(self, config, led_name, default_chain_count):
+        self._config = config
+        self._name = 'neopixel %s' % led_name
+        self._default_chain_count = default_chain_count
+
+    def get_name(self):
+        return self._name
+
+    def get(self, option, default=None, **kwargs):
+        if option == 'chain_count' and self._config.get(option, None) is None:
+            return str(self._default_chain_count)
+        return self._config.get(option, default, **kwargs)
+
+    def getint(self, option, default=None, **kwargs):
+        if option == 'chain_count' and self._config.get(option, None) is None:
+            default = self._default_chain_count
+        return self._config.getint(option, default, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._config, name)
