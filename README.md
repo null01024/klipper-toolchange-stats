@@ -420,6 +420,53 @@ PRINT_START BED=[bed_temperature_initial_layer_single] INITIAL_TOOL=[initial_too
 
 如果你已有自己的 `M104` / `M109` 宏，需要避免命令冲突。
 
+## RGB 状态灯
+
+如果每个工具通道都有一颗 RGB 灯，可以启用 `[multitool_rgb]`。
+它会默认显示对应通道的耗材颜色，并在换头、暂停、打印、断料等状态下叠加动效。
+
+先确认灯带数量足够，例如 4 工具需要：
+
+```ini
+[neopixel my_neopixel]
+pin: toolhead:HEAD_RGB
+chain_count: 4
+color_order: GRB
+```
+
+然后在 `multitool_config.cfg` 中启用：
+
+```ini
+[multitool_rgb]
+led: my_neopixel
+led_indices: 1,2,3,4
+brightness: 0.35
+fallback_colors: #ffffff,#ff8000,#00aaff,#55ff55
+spoolman_colors: True
+idle_effect: solid
+printing_effect: solid
+changing_effect: chase
+heating_effect: breathe
+paused_effect: amber_pulse
+runout_effect: red_flash
+error_effect: red_flash
+```
+
+颜色来源优先级：
+
+- Spoolman 料盘颜色：通过 `SET_TOOL_SPOOL_ID` 绑定料盘后自动同步。
+- 手动颜色：`SET_MULTITOOL_RGB_COLOR TOOL=0 COLOR=#ff8800 SAVE=1`。
+- `fallback_colors`：没有料盘颜色或手动颜色时使用。
+
+常用命令：
+
+```gcode
+QUERY_MULTITOOL_RGB
+SET_MULTITOOL_RGB ENABLE=0
+SET_MULTITOOL_RGB ENABLE=1
+SET_MULTITOOL_RGB_COLOR TOOL=0 COLOR=#ff8800 SAVE=1
+```
+
 ## 耗材检测与断料续打
 
 启用 `[multitool_filament]` 后，每个工具需要一个耗材检测 pin：
@@ -761,7 +808,8 @@ klipper-toolchange-stats/
     ├── multitool_offsets.py
     ├── multitool_clamp.py
     ├── multitool_stats.py
-    └── multitool_filament.py
+    ├── multitool_filament.py
+    └── multitool_rgb.py
 ```
 
 ## 许可证

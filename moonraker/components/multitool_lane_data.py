@@ -19,20 +19,22 @@ class MultitoolLaneData:
         self.server = config.get_server()
         self.database = self.server.lookup_component("database")
         self.http_client = self._lookup_component("http_client")
+        self.klippy_apis = self._lookup_component("klippy_apis")
         self.server.register_remote_method(REMOTE_METHOD, self.update_lane_data)
 
     def update_lane_data(self, tool_count=0, spool_ids=None, loaded=None,
-                         current_tool=-1):
+                         current_tool=-1, rgb_enabled=False):
         eventloop = self.server.get_event_loop()
         eventloop.create_task(self._update_lane_data(
-            tool_count, spool_ids, loaded, current_tool))
+            tool_count, spool_ids, loaded, current_tool, rgb_enabled))
 
     async def _update_lane_data(self, tool_count, spool_ids, loaded,
-                                current_tool):
+                                current_tool, rgb_enabled):
         try:
             tool_count = self._safe_int(tool_count, 0)
             spool_ids = spool_ids if isinstance(spool_ids, list) else []
             loaded = loaded if isinstance(loaded, list) else []
+            rgb_enabled = bool(rgb_enabled)
             for lane in range(tool_count):
                 spool_id = self._list_int(spool_ids, lane, 0)
                 is_loaded = self._list_value(loaded, lane, None)
@@ -41,6 +43,8 @@ class MultitoolLaneData:
                 data = await self._lane_payload(lane, spool_id)
                 await self.database.insert_item(
                     LANE_NAMESPACE, "lane%d" % lane, data)
+                if rgb_enabled:
+                    await self._sync_rgb_color(lane, data.get("color"))
         except Exception:
             logging.exception(
                 "multitool_lane_data: failed to update lane_data")
@@ -113,6 +117,28 @@ class MultitoolLaneData:
                 "multitool_lane_data: failed to fetch Spoolman spool %d",
                 spool_id)
         return None
+
+    async def _sync_rgb_color(self, lane, color):
+        if self.klippy_apis is None:
+            self.klippy_apis = self._lookup_component("klippy_apis")
+            if self.klippy_apis is None:
+                return
+        if color:
+            script = (
+                "SET_MULTITOOL_RGB_COLOR TOOL=%d COLOR=%s SOURCE=spoolman"
+                % (lane, color))
+        else:
+            script = (
+                "SET_MULTITOOL_RGB_COLOR TOOL=%d SOURCE=spoolman CLEAR=1"
+                % lane)
+        try:
+            result = self.klippy_apis.run_gcode(script)
+            if hasattr(result, "__await__"):
+                await result
+        except Exception:
+            logging.debug(
+                "multitool_lane_data: unable to sync RGB color to Klipper",
+                exc_info=True)
 
     def _safe_int(self, value, default):
         try:
