@@ -425,32 +425,26 @@ PRINT_START BED=[bed_temperature_initial_layer_single] INITIAL_TOOL=[initial_too
 如果每个工具通道都有一颗 RGB 灯，可以启用 `[multitool_rgb]`。
 它会默认显示对应通道的耗材颜色，并在换头、暂停、打印、断料等状态下叠加动效。
 
-先确认灯带数量足够，例如 4 工具需要：
-
-```ini
-[neopixel my_neopixel]
-pin: toolhead:HEAD_RGB
-chain_count: 4
-color_order: GRB
-```
-
-然后在 `multitool_config.cfg` 中启用：
+在 `multitool_config.cfg` 中启用：
 
 ```ini
 [multitool_rgb]
-led: my_neopixel
+pin: dock:RGB
+chain_count: 4
+color_order: GRB
 led_indices: 1,2,3,4
 brightness: 0.35
 fallback_colors: #ffffff,#ff8000,#00aaff,#55ff55
 spoolman_colors: True
-idle_effect: solid
-printing_effect: solid
-changing_effect: chase
-heating_effect: breathe
-paused_effect: amber_pulse
-runout_effect: red_flash
-error_effect: red_flash
+effects: True
 ```
+
+`[multitool_rgb]` 会自动创建内部 neopixel 灯带，LED 名固定为
+`multitool_rgb`。`chain_count` 默认等于 `[multitool] tool_count`，
+`led_indices` 默认是 `1..tool_count`；普通一通道一灯珠配置可以省略
+这两项。
+`effects` 用于统一启停动效；设为 `False` 时仍显示状态颜色，但不会
+呼吸、追逐或闪烁。
 
 颜色来源优先级：
 
