@@ -226,7 +226,7 @@ function preflight_checks {
 }
 
 function sync_repo {
-    local installdirname installbasename proxied_repo_url
+    local installdirname installbasename proxied_repo_url clone_attempt
     installdirname="$(dirname "${INSTALL_PATH}")"
     installbasename="$(basename "${INSTALL_PATH}")"
     proxied_repo_url="$(proxy_url "${REPO_URL}")"
@@ -240,12 +240,18 @@ function sync_repo {
         if [ -n "${GH_PROXY}" ] && [ "${proxied_repo_url}" != "${REPO_URL}" ]; then
             echo "           via ${GH_PROXY}"
         fi
-        if git -C "${installdirname}" clone "${proxied_repo_url}" "${installbasename}"; then
-            chmod +x "${INSTALL_PATH}/install.sh" || die "无法设置 install.sh 可执行权限: ${INSTALL_PATH}/install.sh"
-            printf "[DOWNLOAD] 克隆完成！\n\n"
-        else
-            die "克隆 git 仓库失败: ${REPO_URL}"
-        fi
+        for clone_attempt in 1 2; do
+            if git -C "${installdirname}" clone "${proxied_repo_url}" "${installbasename}"; then
+                chmod +x "${INSTALL_PATH}/install.sh" || die "无法设置 install.sh 可执行权限: ${INSTALL_PATH}/install.sh"
+                printf "[DOWNLOAD] 克隆完成！\n\n"
+                break
+            fi
+            if [ "${clone_attempt}" -eq 2 ]; then
+                die "克隆 git 仓库失败: ${REPO_URL}"
+            fi
+            echo "[DOWNLOAD] 克隆失败，删除旧的克隆目录后重试一次..."
+            rm -rf "${INSTALL_PATH}" || die "删除旧的克隆目录失败: ${INSTALL_PATH}"
+        done
         return
     fi
 
