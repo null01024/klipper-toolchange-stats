@@ -167,6 +167,7 @@ class ZdtEmm42:
         self.last = self._empty_status()
         self.error_count = 0
         self.ignored_frames = 0
+        self.request_like_frames = 0
         self.standard_frames = 0
         self.ext_other_frames = 0
         self.error_frames = 0
@@ -259,6 +260,7 @@ class ZdtEmm42:
             'last_rx_id': None,
             'last_rx_payload': None,
             'ignored_frames': 0,
+            'request_like_frames': 0,
             'standard_frames': 0,
             'ext_other_frames': 0,
             'error_frames': 0,
@@ -447,8 +449,6 @@ class ZdtEmm42:
             self._record_ignored_frame('standard', can_id & CAN_SFF_MASK, payload)
             return ('ignore', None)
         arb_id = can_id & CAN_EFF_MASK
-        self.last['last_rx_id'] = "0x%08X" % arb_id
-        self.last['last_rx_payload'] = ' '.join('%02X' % b for b in payload)
         return ('frame', (arb_id, payload))
 
     def _read_raw_frame(self):
@@ -491,6 +491,12 @@ class ZdtEmm42:
             self.ignored_frames += 1
             self.last['ignored_frames'] = self.ignored_frames
             return
+        if self._is_request_like_payload(raw):
+            self.request_like_frames += 1
+            self._record_ignored_frame('request-like', arb_id, raw)
+            self.ignored_frames += 1
+            self.last['ignored_frames'] = self.ignored_frames
+            return
         cmd = self.pending_cmd
         if cmd is None:
             # Unsolicited extended frame from our address (e.g. a reached command).
@@ -508,6 +514,8 @@ class ZdtEmm42:
             self.pending_cmd = None
             return
         if data[0] == self.addr and data[1] == cmd:
+            self.last['last_rx_id'] = "0x%08X" % arb_id
+            self.last['last_rx_payload'] = ' '.join('%02X' % b for b in raw)
             if not self._verify_checksum(data):
                 self.last_error = "bad check byte for cmd 0x%02X" % cmd
                 self.error_count += 1
@@ -523,12 +531,22 @@ class ZdtEmm42:
             self._maybe_write_csv(eventtime)
 
     def _record_ignored_frame(self, frame_type, arb_id, payload):
+        self.last['request_like_frames'] = self.request_like_frames
         self.last['standard_frames'] = self.standard_frames
         self.last['ext_other_frames'] = self.ext_other_frames
         self.last['error_frames'] = self.error_frames
         self.last['last_ignored_type'] = frame_type
         self.last['last_ignored_id'] = "0x%08X" % arb_id
         self.last['last_ignored_payload'] = ' '.join('%02X' % b for b in payload)
+
+    def _is_request_like_payload(self, data):
+        data = bytearray(data)
+        if len(data) == 2:
+            logical = bytearray([self.addr, data[0]])
+            return data[1] == self._checksum(logical)
+        if len(data) == 3 and data[0] == self.addr:
+            return data[2] == self._checksum(data[:2])
+        return False
 
     def _query_sync(self, cmd, extra=b'', timeout=None):
         # Synchronous request/response for interactive g-code commands only. Blocking
@@ -565,6 +583,12 @@ class ZdtEmm42:
                 self.ignored_frames += 1
                 self.last['ignored_frames'] = self.ignored_frames
                 continue
+            if self._is_request_like_payload(data):
+                self.request_like_frames += 1
+                self._record_ignored_frame('request-like', arb_id, data)
+                self.ignored_frames += 1
+                self.last['ignored_frames'] = self.ignored_frames
+                continue
             data = self._normalize_response(data, cmd)
             if len(data) < 4:
                 continue
@@ -572,6 +596,8 @@ class ZdtEmm42:
                 self.last_error = "device returned EE for cmd 0x%02X" % cmd
                 return None
             if data[0] == self.addr and data[1] == cmd:
+                self.last['last_rx_id'] = "0x%08X" % arb_id
+                self.last['last_rx_payload'] = ' '.join('%02X' % b for b in data)
                 if not self._verify_checksum(data):
                     self.last_error = "bad check byte for cmd 0x%02X" % cmd
                     return None
@@ -725,8 +751,9 @@ class ZdtEmm42:
             "tx: id=%s data=%s" % (l.get('last_tx_id'), l.get('last_tx_payload')),
             "rx: id=%s data=%s ignored=%s" % (
                 l.get('last_rx_id'), l.get('last_rx_payload'), l.get('ignored_frames')),
-            "ignored detail: standard=%s ext_other=%s error=%s last=%s id=%s data=%s" % (
-                l.get('standard_frames'), l.get('ext_other_frames'), l.get('error_frames'),
+            "ignored detail: request_like=%s standard=%s ext_other=%s error=%s last=%s id=%s data=%s" % (
+                l.get('request_like_frames'), l.get('standard_frames'),
+                l.get('ext_other_frames'), l.get('error_frames'),
                 l.get('last_ignored_type'), l.get('last_ignored_id'),
                 l.get('last_ignored_payload')),
         ]
