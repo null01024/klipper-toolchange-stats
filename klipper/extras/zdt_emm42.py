@@ -131,6 +131,9 @@ class ZdtEmm42:
         self.last = self._empty_status()
         self.error_count = 0
         self.ignored_frames = 0
+        self.standard_frames = 0
+        self.ext_other_frames = 0
+        self.error_frames = 0
         self.last_error = "not started"
         self.csv_file = None
         self.csv_writer = None
@@ -192,6 +195,12 @@ class ZdtEmm42:
             'last_rx_id': None,
             'last_rx_payload': None,
             'ignored_frames': 0,
+            'standard_frames': 0,
+            'ext_other_frames': 0,
+            'error_frames': 0,
+            'last_ignored_id': None,
+            'last_ignored_payload': None,
+            'last_ignored_type': None,
         }
 
     def _handle_connect(self):
@@ -279,16 +288,28 @@ class ZdtEmm42:
         if len(frame) < CAN_FRAME_SIZE:
             return 'ignore', None
         can_id, dlc, data = struct.unpack(CAN_FRAME_FMT, frame)
+        payload = data[:dlc]
         if can_id & CAN_ERR_FLAG:
+            self.error_frames += 1
+            self._record_ignored_frame('error', can_id & CAN_EFF_MASK, payload)
             return 'ignore', None
         if not (can_id & CAN_EFF_FLAG):
             # Ignore Klipper standard CAN frames on the same bus.
+            self.standard_frames += 1
+            self._record_ignored_frame('standard', can_id & CAN_SFF_MASK, payload)
             return 'ignore', None
         arb_id = can_id & CAN_EFF_MASK
-        payload = data[:dlc]
         self.last['last_rx_id'] = "0x%08X" % arb_id
         self.last['last_rx_payload'] = ' '.join('%02X' % b for b in payload)
         return 'frame', (arb_id, payload)
+
+    def _record_ignored_frame(self, frame_type, arb_id, payload):
+        self.last['standard_frames'] = self.standard_frames
+        self.last['ext_other_frames'] = self.ext_other_frames
+        self.last['error_frames'] = self.error_frames
+        self.last['last_ignored_type'] = frame_type
+        self.last['last_ignored_id'] = "0x%08X" % arb_id
+        self.last['last_ignored_payload'] = ' '.join('%02X' % b for b in payload)
 
     def _drain_rx(self):
         if self.sock is None:
@@ -328,6 +349,8 @@ class ZdtEmm42:
                 continue
             arb_id, data = frame
             if (arb_id >> 8) != self.addr:
+                self.ext_other_frames += 1
+                self._record_ignored_frame('extended-other', arb_id, data)
                 self.ignored_frames += 1
                 self.last['ignored_frames'] = self.ignored_frames
                 continue
@@ -481,6 +504,10 @@ class ZdtEmm42:
             "tx: id=%s data=%s" % (l.get('last_tx_id'), l.get('last_tx_payload')),
             "rx: id=%s data=%s ignored=%s" % (
                 l.get('last_rx_id'), l.get('last_rx_payload'), l.get('ignored_frames')),
+            "ignored detail: standard=%s ext_other=%s error=%s last=%s id=%s data=%s" % (
+                l.get('standard_frames'), l.get('ext_other_frames'), l.get('error_frames'),
+                l.get('last_ignored_type'), l.get('last_ignored_id'),
+                l.get('last_ignored_payload')),
         ]
         gcmd.respond_info("\n".join(lines))
 
