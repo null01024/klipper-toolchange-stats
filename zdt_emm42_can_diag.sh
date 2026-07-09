@@ -21,6 +21,7 @@ LISTEN_SECONDS="2"
 WITH_ADDR="0"
 CMDS="24,35,3A,36"
 KEEP_LOG="0"
+SCAN_RANGE=""
 
 RED="\033[0;31m"
 YELLOW="\033[0;33m"
@@ -51,6 +52,7 @@ Options:
   -c, --checksum HEX      Checksum byte, default: 6B
   --cmds LIST             Comma-separated command bytes, default: 24,35,3A,36
   --listen SECONDS        candump capture time, default: 2
+  --scan START-END        Scan addresses with voltage query, for example: 1-16
   --with-addr             Send serial-shaped payload, e.g. 01 24 6B
   --keep-log              Keep raw candump log and print its path
   -h, --help              Show this help
@@ -114,6 +116,11 @@ parse_args() {
                 LISTEN_SECONDS="$2"
                 shift 2
                 ;;
+            --scan)
+                [ "$#" -ge 2 ] || die "$1 需要参数"
+                SCAN_RANGE="$2"
+                shift 2
+                ;;
             --with-addr)
                 WITH_ADDR="1"
                 shift
@@ -170,6 +177,53 @@ send_queries() {
         printf "  -> cansend %s %s#%s\n" "${IFACE}" "${can_id}" "${payload}"
         cansend "${IFACE}" "${can_id}#${payload}" || warn "发送失败: ${can_id}#${payload}"
         sleep 0.08
+    done
+}
+
+parse_scan_range() {
+    local range start end
+    range="$1"
+    case "${range}" in
+        *-*)
+            start="${range%-*}"
+            end="${range#*-}"
+            ;;
+        *)
+            start="${range}"
+            end="${range}"
+            ;;
+    esac
+    is_uint "${start}" || die "scan 起始地址不是整数: ${start}"
+    is_uint "${end}" || die "scan 结束地址不是整数: ${end}"
+    [ "$((10#${start}))" -ge 1 ] && [ "$((10#${end}))" -le 255 ] || die "scan 地址必须在 1..255"
+    [ "$((10#${start}))" -le "$((10#${end}))" ] || die "scan 起始地址不能大于结束地址"
+    printf "%s %s" "$((10#${start}))" "$((10#${end}))"
+}
+
+scan_payload_for_addr() {
+    local addr
+    addr="$1"
+    if [ "${WITH_ADDR}" = "1" ]; then
+        printf "%02X24%s" "${addr}" "$(hex_byte "${CHECKSUM}")"
+    else
+        printf "24%s" "$(hex_byte "${CHECKSUM}")"
+    fi
+}
+
+send_scan_queries() {
+    local start end addr can_id payload
+    read -r start end <<< "$(parse_scan_range "${SCAN_RANGE}")"
+
+    info "Scanning ZDT addresses with voltage query"
+    printf "  range:     %s-%s\n" "${start}" "${end}"
+    printf "  payload:   %s\n" "$([ "${WITH_ADDR}" = "1" ] && printf 'with address' || printf 'command only')"
+
+    for addr in $(seq "${start}" "${end}"); do
+        can_id="$(printf "%08X" "$((addr << 8))")"
+        payload="$(scan_payload_for_addr "${addr}")"
+        printf "  -> cansend %s %s#%s\n" "${IFACE}" "${can_id}" "${payload}"
+        cansend "${IFACE}" "${can_id}#${payload}" || warn "发送失败: ${can_id}#${payload}"
+        sleep 0.05
     done
 }
 
@@ -254,6 +308,41 @@ summarize_log() {
     fi
 }
 
+summarize_scan_log() {
+    local log_path start end addr can_id compact_id payload hits request_echo responses total_responses
+    log_path="$1"
+    read -r start end <<< "$(parse_scan_range "${SCAN_RANGE}")"
+    total_responses="0"
+
+    info "Scan summary"
+    for addr in $(seq "${start}" "${end}"); do
+        can_id="$(printf "%08X" "$((addr << 8))")"
+        compact_id="$(printf "%03X" "$((addr << 8))")"
+        payload="$(scan_payload_for_addr "${addr}")"
+        hits="$(grep -E -c "(^|[[:space:]])(${can_id}|${compact_id})[#[:space:]]" "${log_path}" || true)"
+        request_echo="$(grep -E -c "(^|[[:space:]])(${can_id}|${compact_id})#${payload}([[:space:]]|$)" "${log_path}" || true)"
+        responses="$((hits - request_echo))"
+        [ "${responses}" -ge 0 ] || responses="0"
+        total_responses="$((total_responses + responses))"
+        printf "  addr=%3s id=%s hits=%s request_echo=%s response_candidates=%s\n" \
+            "${addr}" "${can_id}" "${hits}" "${request_echo}" "${responses}"
+    done
+
+    if [ "${total_responses}" -eq 0 ]; then
+        warn "扫描范围内没有发现疑似 ZDT 回复。若波特率确定正确，重点查 CAN1_MAP、CheckSum、ZDT_CAN 模块、接线和共地。"
+    else
+        info "扫描范围内发现疑似回复，请查看 response_candidates 非 0 的地址和原始抓包。"
+    fi
+
+    echo
+    info "Raw capture"
+    if [ "$(wc -l < "${log_path}" | tr -d ' ')" -gt 0 ]; then
+        tail -n 120 "${log_path}"
+    else
+        echo "  <empty>"
+    fi
+}
+
 main() {
     local log_path dump_pid
 
@@ -275,9 +364,17 @@ main() {
     dump_pid="$!"
     sleep 0.2
 
-    send_queries
+    if [ -n "${SCAN_RANGE}" ]; then
+        send_scan_queries
+    else
+        send_queries
+    fi
     wait "${dump_pid}" >/dev/null 2>&1 || true
-    summarize_log "${log_path}"
+    if [ -n "${SCAN_RANGE}" ]; then
+        summarize_scan_log "${log_path}"
+    else
+        summarize_log "${log_path}"
+    fi
 
     if [ "${KEEP_LOG}" = "1" ]; then
         info "Log kept at: ${log_path}"
