@@ -11,23 +11,30 @@
 #   can_interface: can0
 #   addr: 1
 #   can_payload_includes_addr: False
+#   can_filter: ext            # off | ext (default) | addr
+#   checksum_mode: 0x6B        # 0x6B (default) | xor | crc8 (crc8 unverified)
 #   poll_interval: 0.10
 #   query_timeout: 0.006
 #   rotation_distance: 40
-#   microsteps: 32
+#   microsteps: 16             # MUST match the driver's MStep setting (driver default is 16)
 #   full_steps_per_rotation: 200
 #   csv_path: /tmp/zdt_emm42_shadow_a.csv
 #
 # G-code:
 #   ZDT_EMM_STATUS NAME=shadow_a
 #   ZDT_EMM_QUERY  NAME=shadow_a CMD=0x36
+#   ZDT_EMM_QUERY  NAME=shadow_a CMD=0x42 DATA=6C   ; DATA appends extra request bytes
+#   ZDT_EMM_SNIFF  NAME=shadow_a SECONDS=2          ; capture raw CAN frames for debugging
 #   ZDT_EMM_LOG    NAME=shadow_a ENABLE=1
 #   ZDT_EMM_LOG    NAME=shadow_a ENABLE=0
+#   ZDT_EMM_POLL   NAME=shadow_a ENABLE=1
 #
 # Notes:
 # - Emm42 must be set to CAN1_MAP, extended CAN frame, and the same bus bitrate as can0.
 # - This module uses Linux SocketCAN directly, not Klipper's MCU CAN protocol.
-# - This first version polls short read commands only. It intentionally avoids motion commands.
+# - Reception is asynchronous via the Klipper reactor (register_fd); the poll timer only
+#   sends one short read command per tick and never blocks waiting for the reply.
+# - It intentionally avoids motion commands and only issues short read commands.
 
 import csv
 import logging
@@ -52,7 +59,7 @@ CMD_CURRENT = 0x27           # addr 27 hi lo 6B
 CMD_ENCODER = 0x31           # addr 31 hi lo 6B
 CMD_INPUT_PULSES = 0x32      # addr 32 sign u32 6B
 CMD_TARGET_POS = 0x33        # addr 33 sign u32 6B
-CMD_REALTIME_TARGET = 0x34   # addr 34 sign u32 6B
+CMD_REALTIME_TARGET = 0x34   # addr 34 sign u32 6B (realtime setpoint / open-loop realtime pos)
 CMD_RPM = 0x35               # addr 35 sign u16 6B
 CMD_REAL_POS = 0x36          # addr 36 sign u32 6B
 CMD_POS_ERROR = 0x37         # addr 37 sign u32 6B
@@ -65,6 +72,7 @@ READ_COMMANDS = [
     CMD_ENCODER,
     CMD_INPUT_PULSES,
     CMD_TARGET_POS,
+    CMD_REALTIME_TARGET,
     CMD_RPM,
     CMD_REAL_POS,
     CMD_POS_ERROR,
@@ -103,6 +111,28 @@ def _parse_int(value):
         return int(value, 16)
 
 
+def _parse_hex_bytes(value):
+    # Parse an optional data field like "6C", "6C 00", "0x6C,0x00" into bytes.
+    if value is None:
+        return b''
+    text = str(value).strip()
+    if not text:
+        return b''
+    text = text.replace(',', ' ')
+    out = bytearray()
+    for tok in text.split():
+        if tok.lower().startswith('0x'):
+            tok = tok[2:]
+        if not tok:
+            continue
+        if len(tok) > 2 and len(tok) % 2 == 0:
+            for i in range(0, len(tok), 2):
+                out.append(int(tok[i:i + 2], 16))
+        else:
+            out.append(int(tok, 16))
+    return bytes(out)
+
+
 class ZdtEmm42:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -116,18 +146,24 @@ class ZdtEmm42:
         self.check_byte = config.getint('check_byte', 0x6B, minval=0, maxval=255)
         self.can_payload_includes_addr = config.getboolean(
             'can_payload_includes_addr', False)
+        self.checksum_mode = self._parse_checksum_mode(config)
+        self.can_filter = self._parse_can_filter(config)
         self.poll_interval = config.getfloat('poll_interval', 0.10, above=0.0)
         self.query_timeout = config.getfloat('query_timeout', 0.006, above=0.0)
         self.rotation_distance = config.getfloat('rotation_distance', 40.0, above=0.0)
-        self.microsteps = config.getint('microsteps', 32, minval=1)
+        # microsteps must match the driver's MStep setting (driver default is 16).
+        self.microsteps = config.getint('microsteps', 16, minval=1)
         self.full_steps_per_rotation = config.getint('full_steps_per_rotation', 200, minval=1)
         self.auto_start = config.getboolean('auto_start', True)
         self.csv_path = config.get('csv_path', '')
 
         self.sock = None
+        self.fd_handle = None
         self.timer = None
         self.enabled = False
         self.query_index = 0
+        self.pending_cmd = None
+        self.pending_since = 0.0
         self.last = self._empty_status()
         self.error_count = 0
         self.ignored_frames = 0
@@ -149,11 +185,36 @@ class ZdtEmm42:
             'ZDT_EMM_QUERY', 'NAME', self.name, self.cmd_QUERY,
             desc='Send one raw short read command to a ZDT Emm42')
         self.gcode.register_mux_command(
+            'ZDT_EMM_SNIFF', 'NAME', self.name, self.cmd_SNIFF,
+            desc='Capture raw CAN frames to verify the ZDT Emm42 reply framing')
+        self.gcode.register_mux_command(
             'ZDT_EMM_LOG', 'NAME', self.name, self.cmd_LOG,
             desc='Enable or disable CSV logging for ZDT Emm42 monitor')
         self.gcode.register_mux_command(
             'ZDT_EMM_POLL', 'NAME', self.name, self.cmd_POLL,
             desc='Enable or disable periodic ZDT Emm42 polling')
+
+    def _parse_checksum_mode(self, config):
+        cs = config.get('checksum_mode', '0x6B').strip().lower()
+        if cs in ('0x6b', '6b', 'fixed'):
+            return 'fixed'
+        if cs == 'xor':
+            return 'xor'
+        if cs in ('crc8', 'crc-8'):
+            return 'crc8'
+        raise config.error(
+            "zdt_emm42: invalid checksum_mode '%s' (use 0x6B, xor or crc8)" % cs)
+
+    def _parse_can_filter(self, config):
+        cf = config.get('can_filter', 'ext').strip().lower()
+        if cf in ('off', 'none'):
+            return 'off'
+        if cf in ('ext', 'extended'):
+            return 'ext'
+        if cf in ('addr', 'address'):
+            return 'addr'
+        raise config.error(
+            "zdt_emm42: invalid can_filter '%s' (use off, ext or addr)" % cf)
 
     def _empty_status(self):
         return {
@@ -170,6 +231,9 @@ class ZdtEmm42:
             'target_counts': None,
             'target_deg': None,
             'target_mm': None,
+            'realtime_target_counts': None,
+            'realtime_target_deg': None,
+            'realtime_target_mm': None,
             'rpm': None,
             'actual_counts': None,
             'actual_deg': None,
@@ -219,6 +283,7 @@ class ZdtEmm42:
     def _handle_disconnect(self):
         self.enabled = False
         self._close_csv()
+        self._unregister_fd()
         if self.sock is not None:
             try:
                 self.sock.close()
@@ -231,41 +296,119 @@ class ZdtEmm42:
             return
         s = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
         s.setblocking(False)
+        self._apply_can_filter(s)
         s.bind((self.can_interface,))
         self.sock = s
+        # Reception is handled asynchronously by the reactor so the poll timer
+        # never has to block waiting for a reply.
+        self.fd_handle = self.reactor.register_fd(s.fileno(), self._handle_rx)
+
+    def _apply_can_filter(self, s):
+        # Filter in-kernel so we don't have to drain the whole bus (e.g. Klipper's
+        # own standard-frame MCU traffic) on every poll.
+        if self.can_filter == 'off':
+            return
+        if self.can_filter == 'addr':
+            # Only extended frames whose id high byte equals our address; the low
+            # byte (CAN packet number) is ignored via the mask.
+            can_id = ((self.addr & 0xFF) << 8) | CAN_EFF_FLAG
+            can_mask = 0x0000FF00 | CAN_EFF_FLAG
+        else:  # 'ext': all extended frames (keeps ext-other diagnostics usable).
+            can_id = CAN_EFF_FLAG
+            can_mask = CAN_EFF_FLAG
+        flt = struct.pack("=II", can_id, can_mask)
+        s.setsockopt(socket.SOL_CAN_RAW, socket.CAN_RAW_FILTER, flt)
+
+    def _unregister_fd(self):
+        if self.fd_handle is not None:
+            try:
+                self.reactor.unregister_fd(self.fd_handle)
+            except Exception:
+                pass
+            self.fd_handle = None
 
     def _poll_timer(self, eventtime):
         if not self.enabled:
             return self.reactor.NEVER
         try:
-            # Poll one command per timer tick to avoid blocking Klipper too long.
+            if self.pending_cmd is not None:
+                # The previous command was never answered. Count it as a timeout
+                # (the async rx handler clears pending_cmd as soon as a reply lands).
+                if eventtime - self.pending_since >= self.query_timeout:
+                    self._register_no_response(self.pending_cmd)
+                    self.pending_cmd = None
+                else:
+                    return eventtime + self.poll_interval
             cmd = READ_COMMANDS[self.query_index % len(READ_COMMANDS)]
             self.query_index += 1
-            data = self._query(cmd, self.query_timeout)
-            if data is not None:
-                self._parse_response(cmd, data, eventtime)
-                self.last['online'] = True
-                self.last['last_update_time'] = eventtime
-                self.last_error = "ok"
-                self.last['last_error'] = self.last_error
-                self._maybe_write_csv(eventtime)
-            else:
-                self.error_count += 1
-                self.last['error_count'] = self.error_count
-                if self.error_count % 50 == 1:
-                    self.last_error = "no response for cmd 0x%02X" % cmd
-                    self.last['last_error'] = self.last_error
+            self._send_command(cmd)
+            self.pending_cmd = cmd
+            self.pending_since = eventtime
         except Exception as e:
             self.error_count += 1
             self.last['error_count'] = self.error_count
             self.last_error = str(e)
             self.last['last_error'] = self.last_error
+            self.pending_cmd = None
             logging.exception("zdt_emm42 %s: poll failed", self.name)
         return eventtime + self.poll_interval
+
+    def _register_no_response(self, cmd):
+        self.error_count += 1
+        self.last['error_count'] = self.error_count
+        if self.error_count % 50 == 1:
+            self.last_error = "no response for cmd 0x%02X" % cmd
+            self.last['last_error'] = self.last_error
 
     def _can_id(self, packet_no=0):
         # ZDT CAN extended ID: ID_Addr left-shifted by 8 bits; low byte is packet number.
         return ((self.addr & 0xFF) << 8) | (packet_no & 0xFF)
+
+    def _checksum(self, logical_bytes):
+        # logical_bytes is the command/response WITHOUT the trailing check byte, in
+        # its address-included ("serial-shaped") form. The manual defines XOR/CRC as
+        # "over all preceding bytes", where the address is the first byte.
+        # NOTE: over CAN the address is carried in the frame id, not the payload, so
+        # whether the device folds it into XOR/CRC is not documented. This is only
+        # relevant for the (opt-in, unverified) xor/crc8 modes; 0x6B is fixed.
+        if self.checksum_mode == 'xor':
+            c = 0
+            for b in logical_bytes:
+                c ^= b
+            return c & 0xFF
+        if self.checksum_mode == 'crc8':
+            return self._crc8(logical_bytes)
+        return self.check_byte
+
+    def _crc8(self, data):
+        # Standard CRC-8 (poly 0x07, init 0x00). Parameters are a guess: the manual
+        # gives no CRC-8 example, so treat crc8 mode as experimental until verified.
+        crc = 0
+        for b in data:
+            crc ^= b
+            for _ in range(8):
+                if crc & 0x80:
+                    crc = ((crc << 1) ^ 0x07) & 0xFF
+                else:
+                    crc = (crc << 1) & 0xFF
+        return crc
+
+    def _verify_checksum(self, normalized):
+        # normalized is the address-included form: [addr, func, data..., check].
+        if len(normalized) < 2:
+            return False
+        return normalized[-1] == self._checksum(normalized[:-1])
+
+    def _send_command(self, cmd, extra=b''):
+        logical = bytearray([self.addr & 0xFF, cmd & 0xFF])
+        logical.extend(extra)
+        check = self._checksum(logical)
+        if self.can_payload_includes_addr:
+            payload = bytes(logical) + bytes([check])
+        else:
+            # Address travels in the extended frame id, so drop it from the payload.
+            payload = bytes(logical[1:]) + bytes([check])
+        self._send_payload(payload, 0)
 
     def _send_payload(self, payload, packet_no=0):
         if self.sock is None:
@@ -278,30 +421,106 @@ class ZdtEmm42:
         self.last['last_tx_payload'] = ' '.join('%02X' % b for b in payload)
         self.sock.send(frame)
 
-    def _recv_frame(self, timeout):
+    def _read_one_frame(self):
+        # Non-blocking read of a single CAN frame with classification. Returns
+        # ('frame', (arb_id, payload)), ('ignore', None), or None when the socket
+        # is empty. The reactor tells us when the fd is readable, so no select here.
         if self.sock is None:
             return None
-        r, _, _ = select.select([self.sock], [], [], timeout)
-        if not r:
+        try:
+            frame = self.sock.recv(CAN_FRAME_SIZE)
+        except (BlockingIOError, InterruptedError):
             return None
-        frame = self.sock.recv(CAN_FRAME_SIZE)
+        except OSError:
+            return None
         if len(frame) < CAN_FRAME_SIZE:
-            return 'ignore', None
+            return ('ignore', None)
         can_id, dlc, data = struct.unpack(CAN_FRAME_FMT, frame)
         payload = data[:dlc]
         if can_id & CAN_ERR_FLAG:
             self.error_frames += 1
             self._record_ignored_frame('error', can_id & CAN_EFF_MASK, payload)
-            return 'ignore', None
+            return ('ignore', None)
         if not (can_id & CAN_EFF_FLAG):
-            # Ignore Klipper standard CAN frames on the same bus.
+            # Standard CAN frames (e.g. Klipper's own MCU traffic) are not ours.
             self.standard_frames += 1
             self._record_ignored_frame('standard', can_id & CAN_SFF_MASK, payload)
-            return 'ignore', None
+            return ('ignore', None)
         arb_id = can_id & CAN_EFF_MASK
         self.last['last_rx_id'] = "0x%08X" % arb_id
         self.last['last_rx_payload'] = ' '.join('%02X' % b for b in payload)
-        return 'frame', (arb_id, payload)
+        return ('frame', (arb_id, payload))
+
+    def _read_raw_frame(self):
+        # Non-blocking read that returns raw (is_extended, id, dlc, payload) with no
+        # filtering or bookkeeping. Used only by the sniffer for diagnostics.
+        if self.sock is None:
+            return None
+        try:
+            frame = self.sock.recv(CAN_FRAME_SIZE)
+        except (BlockingIOError, InterruptedError, OSError):
+            return None
+        if len(frame) < CAN_FRAME_SIZE:
+            return None
+        can_id, dlc, data = struct.unpack(CAN_FRAME_FMT, frame)
+        eff = bool(can_id & CAN_EFF_FLAG)
+        disp_id = can_id & (CAN_EFF_MASK if eff else CAN_SFF_MASK)
+        return (eff, disp_id, dlc, bytes(data[:dlc]))
+
+    def _handle_rx(self, eventtime):
+        # Reactor callback: drain everything currently readable on the socket.
+        try:
+            while True:
+                frame = self._read_one_frame()
+                if frame is None:
+                    break
+                kind, value = frame
+                if kind != 'frame':
+                    self.ignored_frames += 1
+                    self.last['ignored_frames'] = self.ignored_frames
+                    continue
+                arb_id, data = value
+                self._process_frame(arb_id, data, eventtime)
+        except Exception:
+            logging.exception("zdt_emm42 %s: rx handler failed", self.name)
+
+    def _process_frame(self, arb_id, raw, eventtime):
+        if (arb_id >> 8) != self.addr:
+            self.ext_other_frames += 1
+            self._record_ignored_frame('extended-other', arb_id, raw)
+            self.ignored_frames += 1
+            self.last['ignored_frames'] = self.ignored_frames
+            return
+        cmd = self.pending_cmd
+        if cmd is None:
+            # Unsolicited extended frame from our address (e.g. a reached command).
+            self.ignored_frames += 1
+            self.last['ignored_frames'] = self.ignored_frames
+            return
+        data = self._normalize_response(raw, cmd)
+        if len(data) < 4:
+            return
+        # Generic error: addr 00 EE 6B
+        if data[0] == self.addr and data[1] == 0x00 and data[2] == 0xEE:
+            self.last_error = "device returned EE for cmd 0x%02X" % cmd
+            self.error_count += 1
+            self.last['error_count'] = self.error_count
+            self.pending_cmd = None
+            return
+        if data[0] == self.addr and data[1] == cmd:
+            if not self._verify_checksum(data):
+                self.last_error = "bad check byte for cmd 0x%02X" % cmd
+                self.error_count += 1
+                self.last['error_count'] = self.error_count
+                self.pending_cmd = None
+                return
+            self._parse_response(cmd, bytearray(data))
+            self.last['online'] = True
+            self.last['last_update_time'] = eventtime
+            self.last_error = "ok"
+            self.last['last_error'] = self.last_error
+            self.pending_cmd = None
+            self._maybe_write_csv(eventtime)
 
     def _record_ignored_frame(self, frame_type, arb_id, payload):
         self.last['standard_frames'] = self.standard_frames
@@ -311,73 +530,65 @@ class ZdtEmm42:
         self.last['last_ignored_id'] = "0x%08X" % arb_id
         self.last['last_ignored_payload'] = ' '.join('%02X' % b for b in payload)
 
-    def _drain_rx(self):
+    def _query_sync(self, cmd, extra=b'', timeout=None):
+        # Synchronous request/response for interactive g-code commands only. Blocking
+        # briefly here is acceptable because it runs from a g-code handler, not the
+        # periodic poll. The periodic path is fully asynchronous (_handle_rx).
+        if timeout is None:
+            timeout = self.query_timeout
         if self.sock is None:
-            return
-        # Remove stale frames from this socket's queue before a synchronous query.
-        while True:
-            r, _, _ = select.select([self.sock], [], [], 0)
-            if not r:
-                break
-            try:
-                self.sock.recv(CAN_FRAME_SIZE)
-            except Exception:
-                break
-
-    def _query(self, cmd, timeout):
-        # CAN carries the address in the extended frame ID. Per the ZDT manual,
-        # payload data starts with the function code unless compatibility mode
-        # is explicitly enabled.
-        self._drain_rx()
-        if self.can_payload_includes_addr:
-            payload = bytes([self.addr, cmd, self.check_byte])
-        else:
-            payload = bytes([cmd, self.check_byte])
-        self._send_payload(payload, 0)
+            self._open_socket()
+        # Discard any stale frames still queued before we send.
+        while self._read_one_frame() is not None:
+            pass
+        self._send_command(cmd, extra)
         deadline = time.monotonic() + timeout
         while True:
             remain = deadline - time.monotonic()
             if remain <= 0.0:
                 return None
-            frame = self._recv_frame(remain)
-            if frame is None:
+            r, _, _ = select.select([self.sock], [], [], remain)
+            if not r:
                 return None
-            kind, frame = frame
-            if kind == 'ignore':
+            frame = self._read_one_frame()
+            if frame is None:
+                continue
+            kind, value = frame
+            if kind != 'frame':
                 self.ignored_frames += 1
                 self.last['ignored_frames'] = self.ignored_frames
                 continue
-            arb_id, data = frame
+            arb_id, data = value
             if (arb_id >> 8) != self.addr:
                 self.ext_other_frames += 1
                 self._record_ignored_frame('extended-other', arb_id, data)
                 self.ignored_frames += 1
                 self.last['ignored_frames'] = self.ignored_frames
                 continue
-            data = self._normalize_response(data)
+            data = self._normalize_response(data, cmd)
             if len(data) < 4:
-                self.ignored_frames += 1
-                self.last['ignored_frames'] = self.ignored_frames
                 continue
-            # Generic error: addr 00 EE 6B
             if data[0] == self.addr and data[1] == 0x00 and data[2] == 0xEE:
                 self.last_error = "device returned EE for cmd 0x%02X" % cmd
                 return None
             if data[0] == self.addr and data[1] == cmd:
-                if data[-1] != self.check_byte:
+                if not self._verify_checksum(data):
                     self.last_error = "bad check byte for cmd 0x%02X" % cmd
                     return None
                 return bytearray(data)
 
-    def _normalize_response(self, data):
-        # Serial examples include address in the payload: 01 24 5C 6A 6B.
-        # CAN responses may omit it because frame ID already carries address:
-        # 24 5C 6A 6B. Normalize to the serial-shaped form used by parsers.
-        if len(data) >= 1 and data[0] == self.addr:
-            return bytearray(data)
-        return bytearray([self.addr]) + bytearray(data)
+    def _normalize_response(self, data, cmd):
+        # Serial-style responses include the address: 01 24 5C 6A 6B. Over CAN the
+        # address is usually omitted because the frame id already carries it:
+        # 24 5C 6A 6B. Decide using the known function code position (byte 1 is the
+        # echoed func code, or 0x00 for an error) rather than a bare "== addr" test,
+        # so an address that happens to equal a data byte cannot fool us.
+        data = bytearray(data)
+        if len(data) >= 2 and data[0] == self.addr and (data[1] == cmd or data[1] == 0x00):
+            return data
+        return bytearray([self.addr]) + data
 
-    def _parse_response(self, cmd, data, eventtime):
+    def _parse_response(self, cmd, data):
         if cmd == CMD_VOLTAGE and len(data) >= 5:
             self.last['voltage_mv'] = _u16(data, 2)
         elif cmd == CMD_CURRENT and len(data) >= 5:
@@ -394,6 +605,11 @@ class ZdtEmm42:
             self.last['target_counts'] = counts
             self.last['target_deg'] = self._counts_to_deg(counts)
             self.last['target_mm'] = self._counts_to_mm(counts)
+        elif cmd == CMD_REALTIME_TARGET and len(data) >= 8:
+            counts = _signed_value(data[2], _u32(data, 3))
+            self.last['realtime_target_counts'] = counts
+            self.last['realtime_target_deg'] = self._counts_to_deg(counts)
+            self.last['realtime_target_mm'] = self._counts_to_mm(counts)
         elif cmd == CMD_RPM and len(data) >= 6:
             self.last['rpm'] = _signed_value(data[2], _u16(data, 3))
         elif cmd == CMD_REAL_POS and len(data) >= 8:
@@ -444,6 +660,7 @@ class ZdtEmm42:
             self.csv_writer.writerow([
                 'monotonic_time', 'name', 'voltage_mv', 'current_ma', 'encoder_counts',
                 'input_pulses', 'input_pulses_mm', 'target_counts', 'target_deg', 'target_mm',
+                'realtime_target_counts', 'realtime_target_deg', 'realtime_target_mm',
                 'rpm', 'actual_counts', 'actual_deg', 'actual_mm', 'error_counts', 'error_deg',
                 'error_mm', 'motor_flags', 'enabled', 'reached', 'stalled', 'stall_protect',
                 'home_flags', 'encoder_ready', 'calibration_ready', 'homing', 'home_failed'
@@ -472,7 +689,9 @@ class ZdtEmm42:
         self.csv_writer.writerow([
             '%.6f' % eventtime, self.name, l.get('voltage_mv'), l.get('current_ma'),
             l.get('encoder_counts'), l.get('input_pulses'), l.get('input_pulses_mm'),
-            l.get('target_counts'), l.get('target_deg'), l.get('target_mm'), l.get('rpm'),
+            l.get('target_counts'), l.get('target_deg'), l.get('target_mm'),
+            l.get('realtime_target_counts'), l.get('realtime_target_deg'),
+            l.get('realtime_target_mm'), l.get('rpm'),
             l.get('actual_counts'), l.get('actual_deg'), l.get('actual_mm'),
             l.get('error_counts'), l.get('error_deg'), l.get('error_mm'), l.get('motor_flags'),
             l.get('enabled'), l.get('reached'), l.get('stalled'), l.get('stall_protect'),
@@ -494,6 +713,8 @@ class ZdtEmm42:
                 self.name, self.addr, self.can_interface, l.get('online')),
             "V=%s mV  I=%s mA  rpm=%s" % (l.get('voltage_mv'), l.get('current_ma'), l.get('rpm')),
             "target=%s deg / %s mm" % (self._fmt(l.get('target_deg')), self._fmt(l.get('target_mm'))),
+            "rt_target=%s deg / %s mm" % (
+                self._fmt(l.get('realtime_target_deg')), self._fmt(l.get('realtime_target_mm'))),
             "actual=%s deg / %s mm" % (self._fmt(l.get('actual_deg')), self._fmt(l.get('actual_mm'))),
             "error=%s deg / %s mm" % (self._fmt(l.get('error_deg')), self._fmt(l.get('error_mm'))),
             "flags: enabled=%s reached=%s stalled=%s stall_protect=%s" % (
@@ -516,11 +737,68 @@ class ZdtEmm42:
         cmd = _parse_int(cmd_s)
         if cmd < 0 or cmd > 255:
             raise gcmd.error("CMD must be 0..255")
-        data = self._query(cmd, self.query_timeout)
+        try:
+            extra = _parse_hex_bytes(gcmd.get('DATA', ''))
+        except ValueError:
+            raise gcmd.error("DATA must be hex bytes, e.g. DATA=6C or DATA=\"6C 00\"")
+        if len(extra) > 6:
+            raise gcmd.error("DATA too long for a single short frame")
+        data = self._query_sync(cmd, extra, self.query_timeout)
         if data is None:
             raise gcmd.error("No valid response for cmd 0x%02X: %s" % (cmd, self.last_error))
-        self._parse_response(cmd, data, self.reactor.monotonic())
+        self._parse_response(cmd, data)
         gcmd.respond_info("0x%02X <= %s" % (cmd, ' '.join('%02X' % b for b in data)))
+
+    def cmd_SNIFF(self, gcmd):
+        seconds = gcmd.get_float('SECONDS', 2.0, above=0.0, maxval=10.0)
+        max_frames = gcmd.get_int('MAX', 80, minval=1, maxval=500)
+        if self.sock is None:
+            self._open_socket()
+        reactor = self.reactor
+        # Take over the socket from the async handler for the capture window so the
+        # two don't fight over recv(). reactor.pause() keeps the MCU serviced.
+        had_fd = self.fd_handle is not None
+        self._unregister_fd()
+        captured = []
+        try:
+            while self._read_raw_frame() is not None:
+                pass
+            end = reactor.monotonic() + seconds
+            idx = 0
+            next_send = reactor.monotonic()
+            while True:
+                now = reactor.monotonic()
+                if now >= end or len(captured) >= max_frames:
+                    break
+                if now >= next_send:
+                    cmd = READ_COMMANDS[idx % len(READ_COMMANDS)]
+                    idx += 1
+                    try:
+                        self._send_command(cmd)
+                    except Exception:
+                        pass
+                    next_send = now + 0.05
+                got = False
+                while len(captured) < max_frames:
+                    raw = self._read_raw_frame()
+                    if raw is None:
+                        break
+                    got = True
+                    eff, disp_id, dlc, payload = raw
+                    captured.append("%s 0x%0*X [%d] %s" % (
+                        'EXT' if eff else 'STD', 8 if eff else 3, disp_id, dlc,
+                        ' '.join('%02X' % b for b in payload)))
+                reactor.pause(reactor.monotonic() + (0.0 if got else 0.02))
+        finally:
+            if had_fd and self.sock is not None:
+                self.fd_handle = reactor.register_fd(self.sock.fileno(), self._handle_rx)
+        if not captured:
+            gcmd.respond_info(
+                "ZDT Emm42 '%s': no frames captured in %.1fs (check wiring, "
+                "CAN1_MAP, bitrate, and can_filter)" % (self.name, seconds))
+        else:
+            gcmd.respond_info("ZDT Emm42 '%s' captured %d frame(s):\n%s" % (
+                self.name, len(captured), "\n".join(captured)))
 
     def cmd_LOG(self, gcmd):
         enable = gcmd.get_int('ENABLE', 1, minval=0, maxval=1)
@@ -537,6 +815,8 @@ class ZdtEmm42:
         self.enabled = bool(enable)
         if self.timer is None:
             self.timer = self.reactor.register_timer(self._poll_timer)
+        if not self.enabled:
+            self.pending_cmd = None
         self.reactor.update_timer(self.timer, self.reactor.NOW if self.enabled else self.reactor.NEVER)
         gcmd.respond_info("ZDT Emm42 '%s' polling %s" % (self.name, 'enabled' if self.enabled else 'disabled'))
 
