@@ -10,6 +10,7 @@
 #   [zdt_emm42 shadow_a]
 #   can_interface: can0
 #   addr: 1
+#   can_payload_includes_addr: False
 #   poll_interval: 0.10
 #   query_timeout: 0.006
 #   rotation_distance: 40
@@ -87,14 +88,15 @@ def _signed_value(sign_byte, raw):
 
 
 def _parse_int(value):
-    # Klipper gcmd values arrive as strings. Accept decimal, 0xNN, or bare hex like "36".
+    # Klipper gcmd values arrive as strings. ZDT command bytes are normally
+    # written as hex, so accept 0xNN and bare two-digit forms like "36".
     if isinstance(value, int):
         return value
     value = str(value).strip()
     if value.lower().startswith("0x"):
         return int(value, 16)
-    # Treat pure two-character hex commands such as "36" as hex only when letters exist
-    # or the string is explicitly prefixed. Decimal is safer for config values.
+    if len(value) <= 2:
+        return int(value, 16)
     try:
         return int(value, 10)
     except ValueError:
@@ -112,6 +114,8 @@ class ZdtEmm42:
         self.can_interface = config.get('can_interface', 'can0')
         self.addr = config.getint('addr', 1, minval=1, maxval=255)
         self.check_byte = config.getint('check_byte', 0x6B, minval=0, maxval=255)
+        self.can_payload_includes_addr = config.getboolean(
+            'can_payload_includes_addr', False)
         self.poll_interval = config.getfloat('poll_interval', 0.10, above=0.0)
         self.query_timeout = config.getfloat('query_timeout', 0.006, above=0.0)
         self.rotation_distance = config.getfloat('rotation_distance', 40.0, above=0.0)
@@ -126,6 +130,7 @@ class ZdtEmm42:
         self.query_index = 0
         self.last = self._empty_status()
         self.error_count = 0
+        self.ignored_frames = 0
         self.last_error = "not started"
         self.csv_file = None
         self.csv_writer = None
@@ -182,6 +187,11 @@ class ZdtEmm42:
             'error_count': 0,
             'last_error': getattr(self, 'last_error', ''),
             'csv_logging': False,
+            'last_tx_id': None,
+            'last_tx_payload': None,
+            'last_rx_id': None,
+            'last_rx_payload': None,
+            'ignored_frames': 0,
         }
 
     def _handle_connect(self):
@@ -255,6 +265,8 @@ class ZdtEmm42:
             raise ValueError("short-frame sender only supports <=8 bytes")
         arb_id = self._can_id(packet_no) | CAN_EFF_FLAG
         frame = struct.pack(CAN_FRAME_FMT, arb_id, len(payload), payload.ljust(8, b'\x00'))
+        self.last['last_tx_id'] = "0x%08X" % (arb_id & CAN_EFF_MASK)
+        self.last['last_tx_payload'] = ' '.join('%02X' % b for b in payload)
         self.sock.send(frame)
 
     def _recv_frame(self, timeout):
@@ -265,16 +277,18 @@ class ZdtEmm42:
             return None
         frame = self.sock.recv(CAN_FRAME_SIZE)
         if len(frame) < CAN_FRAME_SIZE:
-            return None
+            return 'ignore', None
         can_id, dlc, data = struct.unpack(CAN_FRAME_FMT, frame)
         if can_id & CAN_ERR_FLAG:
-            return None
+            return 'ignore', None
         if not (can_id & CAN_EFF_FLAG):
             # Ignore Klipper standard CAN frames on the same bus.
-            return None
+            return 'ignore', None
         arb_id = can_id & CAN_EFF_MASK
         payload = data[:dlc]
-        return arb_id, payload
+        self.last['last_rx_id'] = "0x%08X" % arb_id
+        self.last['last_rx_payload'] = ' '.join('%02X' % b for b in payload)
+        return 'frame', (arb_id, payload)
 
     def _drain_rx(self):
         if self.sock is None:
@@ -290,22 +304,37 @@ class ZdtEmm42:
                 break
 
     def _query(self, cmd, timeout):
-        # Send: addr + cmd + check_byte. Receive matching short response.
+        # CAN carries the address in the extended frame ID. Per the ZDT manual,
+        # payload data starts with the function code unless compatibility mode
+        # is explicitly enabled.
         self._drain_rx()
-        payload = bytes([self.addr, cmd, self.check_byte])
+        if self.can_payload_includes_addr:
+            payload = bytes([self.addr, cmd, self.check_byte])
+        else:
+            payload = bytes([cmd, self.check_byte])
         self._send_payload(payload, 0)
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         while True:
-            remain = deadline - time.time()
+            remain = deadline - time.monotonic()
             if remain <= 0.0:
                 return None
             frame = self._recv_frame(remain)
             if frame is None:
                 return None
+            kind, frame = frame
+            if kind == 'ignore':
+                self.ignored_frames += 1
+                self.last['ignored_frames'] = self.ignored_frames
+                continue
             arb_id, data = frame
             if (arb_id >> 8) != self.addr:
+                self.ignored_frames += 1
+                self.last['ignored_frames'] = self.ignored_frames
                 continue
+            data = self._normalize_response(data)
             if len(data) < 4:
+                self.ignored_frames += 1
+                self.last['ignored_frames'] = self.ignored_frames
                 continue
             # Generic error: addr 00 EE 6B
             if data[0] == self.addr and data[1] == 0x00 and data[2] == 0xEE:
@@ -316,6 +345,14 @@ class ZdtEmm42:
                     self.last_error = "bad check byte for cmd 0x%02X" % cmd
                     return None
                 return bytearray(data)
+
+    def _normalize_response(self, data):
+        # Serial examples include address in the payload: 01 24 5C 6A 6B.
+        # CAN responses may omit it because frame ID already carries address:
+        # 24 5C 6A 6B. Normalize to the serial-shaped form used by parsers.
+        if len(data) >= 1 and data[0] == self.addr:
+            return bytearray(data)
+        return bytearray([self.addr]) + bytearray(data)
 
     def _parse_response(self, cmd, data, eventtime):
         if cmd == CMD_VOLTAGE and len(data) >= 5:
@@ -441,6 +478,9 @@ class ZdtEmm42:
             "home: encoder_ready=%s calibration_ready=%s homing=%s home_failed=%s" % (
                 l.get('encoder_ready'), l.get('calibration_ready'), l.get('homing'), l.get('home_failed')),
             "errors=%d last_error=%s csv=%s" % (self.error_count, self.last_error, self.csv_logging),
+            "tx: id=%s data=%s" % (l.get('last_tx_id'), l.get('last_tx_payload')),
+            "rx: id=%s data=%s ignored=%s" % (
+                l.get('last_rx_id'), l.get('last_rx_payload'), l.get('ignored_frames')),
         ]
         gcmd.respond_info("\n".join(lines))
 
