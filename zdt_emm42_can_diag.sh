@@ -174,13 +174,41 @@ send_queries() {
 }
 
 summarize_log() {
-    local log_path can_id compact_id total addr_hits query_hits response_candidates ext_like standard_like error_like
+    local log_path can_id compact_id total addr_hits query_hits request_like response_candidates ext_like standard_like error_like
     log_path="$1"
     can_id="$(printf "%08X" "$((10#${ADDR} << 8))")"
     compact_id="$(printf "%03X" "$((10#${ADDR} << 8))")"
 
     total="$(wc -l < "${log_path}" | tr -d ' ')"
     addr_hits="$(grep -E -c "(^|[[:space:]])(${can_id}|${compact_id})[#[:space:]]" "${log_path}" || true)"
+    request_like="$(awk -v id1="${can_id}" -v id2="${compact_id}" \
+        -v addr="$(printf "%02X" "$((10#${ADDR}))")" \
+        -v checksum="$(hex_byte "${CHECKSUM}")" '
+        {
+            for (i = 1; i <= NF; i++) {
+                if (index($i, "#") == 0) {
+                    continue
+                }
+                split($i, parts, "#")
+                frame_id = toupper(parts[1])
+                payload = toupper(parts[2])
+                if (frame_id != id1 && frame_id != id2) {
+                    continue
+                }
+                # Query shape in CAN mode: CMD + CHECKSUM, e.g. 246B.
+                if (length(payload) == 4 && substr(payload, 3, 2) == checksum) {
+                    count++
+                    continue
+                }
+                # Compatibility/serial-shaped query: ADDR + CMD + CHECKSUM.
+                if (length(payload) == 6 && substr(payload, 1, 2) == addr &&
+                    substr(payload, 5, 2) == checksum) {
+                    count++
+                    continue
+                }
+            }
+        }
+        END { print count + 0 }' "${log_path}")"
     query_hits="0"
     IFS=',' read -r -a cmd_array <<< "${CMDS}"
     for cmd in "${cmd_array[@]}"; do
@@ -189,7 +217,7 @@ summarize_log() {
         payload="$(build_payload "${cmd}")"
         query_hits="$((query_hits + $(grep -E -c "(^|[[:space:]])(${can_id}|${compact_id})#${payload}([[:space:]]|$)" "${log_path}" || true)))"
     done
-    response_candidates="$((addr_hits - query_hits))"
+    response_candidates="$((addr_hits - request_like))"
     [ "${response_candidates}" -ge 0 ] || response_candidates="0"
     ext_like="$(grep -E -c "(^|[[:space:]])[0-9A-Fa-f]{8}[#[:space:]]" "${log_path}" || true)"
     standard_like="$(grep -E -c "(^|[[:space:]])[0-9A-Fa-f]{3}[#[:space:]]" "${log_path}" || true)"
@@ -198,7 +226,8 @@ summarize_log() {
     info "Capture summary"
     printf "  raw frames:          %s\n" "${total}"
     printf "  frames with ZDT id:  %s (%s or %s)\n" "${addr_hits}" "${can_id}" "${compact_id}"
-    printf "  query echo frames:   %s\n" "${query_hits}"
+    printf "  script query echoes: %s\n" "${query_hits}"
+    printf "  request-like frames: %s\n" "${request_like}"
     printf "  response candidates: %s\n" "${response_candidates}"
     printf "  extended-like ids:   %s\n" "${ext_like}"
     printf "  standard-like ids:   %s\n" "${standard_like}"
