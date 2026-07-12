@@ -20,6 +20,10 @@
 #   microsteps: 16             # MUST match the driver's MStep setting (driver default is 16)
 #   full_steps_per_rotation: 200
 #   csv_path: /tmp/zdt_emm42_shadow_a.csv
+#   autotune_settle_time: 0.50
+#   autotune_kp_step: 5000
+#   autotune_ki_step: 20
+#   autotune_kd_step: 5000
 #
 # G-code:
 #   ZDT_EMM_STATUS NAME=shadow_a
@@ -29,13 +33,16 @@
 #   ZDT_EMM_LOG    NAME=shadow_a ENABLE=1
 #   ZDT_EMM_LOG    NAME=shadow_a ENABLE=0
 #   ZDT_EMM_POLL   NAME=shadow_a ENABLE=1
+#   ZDT_EMM_AUTOTUNE NAME=shadow_a AXIS=X DISTANCE=10 SPEED=20 ACCEL=200 ITERATIONS=20 CONFIRM=1
 #
 # Notes:
 # - Emm42 must be set to CAN1_MAP, extended CAN frame, and the same bus bitrate as can0.
 # - This module uses Linux SocketCAN directly, not Klipper's MCU CAN protocol.
 # - Reception is asynchronous via the Klipper reactor (register_fd); the poll timer only
 #   sends one short read command per tick and never blocks waiting for the reply.
-# - It intentionally avoids motion commands and only issues short read commands.
+# - The normal monitor only issues read commands.  ZDT_EMM_AUTOTUNE is the explicit
+#   opt-in command that temporarily writes the position-loop PID while exercising
+#   one user-selected Klipper axis.
 
 import csv
 from collections import deque
@@ -56,7 +63,8 @@ CAN_FRAME_FMT = "=IB3x8s"
 CAN_FRAME_SIZE = struct.calcsize(CAN_FRAME_FMT)
 
 # Common ZDT read commands used here.
-CMD_READ_PID = 0x21          # response is >8 bytes; not used by default in CAN short polling
+CMD_READ_PID = 0x21          # response is >8 bytes and uses CAN long-response framing
+CMD_WRITE_PID = 0x4A         # long request, short response
 CMD_VOLTAGE = 0x24           # addr 24 hi lo 6B
 CMD_CURRENT = 0x27           # addr 27 hi lo 6B
 CMD_ENCODER = 0x31           # addr 31 hi lo 6B
@@ -70,6 +78,10 @@ CMD_MOTOR_FLAGS = 0x3A       # addr 3A flags 6B
 CMD_HOME_FLAGS = 0x3B        # addr 3B flags 6B
 
 ERROR_HISTORY_SECONDS = 5.0
+PID_RESPONSE_LEN = 15        # address + command + KP[4] + KI[4] + KD[4] + check
+PID_WRITE_SUBCOMMAND = 0xC3
+PID_MIN_VALUE = 0
+PID_MAX_VALUE = 0xFFFFFFFF
 
 READ_COMMANDS = [
     CMD_VOLTAGE,
@@ -98,6 +110,13 @@ def _u16(data, index):
 def _u32(data, index):
     return ((data[index] << 24) | (data[index + 1] << 16) |
             (data[index + 2] << 8) | data[index + 3])
+
+
+def _pack_u32(value):
+    value = int(value)
+    if value < PID_MIN_VALUE or value > PID_MAX_VALUE:
+        raise ValueError('PID value must be in the range 0..0xFFFFFFFF')
+    return struct.pack('>I', value)
 
 
 def _signed_value(sign_byte, raw):
@@ -170,6 +189,25 @@ class ZdtEmm42:
         self.full_steps_per_rotation = config.getint('full_steps_per_rotation', 200, minval=1)
         self.auto_start = config.getboolean('auto_start', True)
         self.csv_path = config.get('csv_path', '')
+        self.autotune_settle_time = config.getfloat(
+            'autotune_settle_time', 0.50, above=0.0, maxval=30.0)
+        self.autotune_min_samples = config.getint(
+            'autotune_min_samples', 3, minval=1, maxval=1000)
+        self.autotune_kp_step = config.getint(
+            'autotune_kp_step', 5000, minval=1, maxval=PID_MAX_VALUE)
+        self.autotune_ki_step = config.getint(
+            'autotune_ki_step', 20, minval=1, maxval=PID_MAX_VALUE)
+        self.autotune_kd_step = config.getint(
+            'autotune_kd_step', 5000, minval=1, maxval=PID_MAX_VALUE)
+        self.autotune_pid_min = config.getint(
+            'autotune_pid_min', PID_MIN_VALUE, minval=PID_MIN_VALUE,
+            maxval=PID_MAX_VALUE)
+        self.autotune_pid_max = config.getint(
+            'autotune_pid_max', PID_MAX_VALUE, minval=PID_MIN_VALUE,
+            maxval=PID_MAX_VALUE)
+        if self.autotune_pid_min > self.autotune_pid_max:
+            raise config.error('zdt_emm42: autotune_pid_min must not exceed '
+                               'autotune_pid_max')
 
         self.sock = None
         self.fd_handle = None
@@ -196,6 +234,8 @@ class ZdtEmm42:
         self.csv_file = None
         self.csv_writer = None
         self.csv_logging = False
+        self.autotune_active = False
+        self.autotune_abort = False
 
         self.printer.register_event_handler('klippy:connect', self._handle_connect)
         self.printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
@@ -215,6 +255,9 @@ class ZdtEmm42:
         self.gcode.register_mux_command(
             'ZDT_EMM_POLL', 'NAME', self.name, self.cmd_POLL,
             desc='Enable or disable periodic ZDT Emm42 polling')
+        self.gcode.register_mux_command(
+            'ZDT_EMM_AUTOTUNE', 'NAME', self.name, self.cmd_AUTOTUNE,
+            desc='Tune ZDT Emm42 position-loop PID using a safe axis motion')
 
     def _parse_checksum_mode(self, config):
         cs = config.get('checksum_mode', '0x6B').strip().lower()
@@ -265,6 +308,10 @@ class ZdtEmm42:
             'error_counts': None,
             'error_deg': None,
             'error_mm': None,
+            'pid_kp': None,
+            'pid_ki': None,
+            'pid_kd': None,
+            'pid_write_status': None,
             'motor_flags': None,
             'enabled': None,
             'reached': None,
@@ -478,6 +525,34 @@ class ZdtEmm42:
             payload = bytes(logical[1:]) + bytes([check])
         self._send_payload(payload, 0)
 
+    def _send_long_command(self, cmd, extra=b''):
+        """Send a ZDT long command using the documented CAN packet format.
+
+        The serial-shaped checksum still includes the address, while the CAN
+        payload carries the command and command data only.  Each CAN packet
+        repeats the command byte and carries at most seven continuation bytes.
+        """
+        if self.can_payload_includes_addr:
+            raise ValueError(
+                'long CAN commands require can_payload_includes_addr=False')
+        logical = bytearray([self.addr & 0xFF, cmd & 0xFF])
+        logical.extend(extra)
+        tail = bytearray(extra)
+        tail.append(self._checksum(logical))
+        packet_no = 0
+        while tail:
+            chunk = tail[:7]
+            del tail[:7]
+            self._send_payload(bytes([cmd & 0xFF]) + bytes(chunk), packet_no)
+            packet_no += 1
+
+    def _normalize_long_packet(self, raw, cmd):
+        """Return command-only bytes from one CAN response packet."""
+        data = bytearray(raw)
+        if len(data) >= 2 and data[0] == self.addr and data[1] in (cmd, 0x00):
+            return data[1:]
+        return data
+
     def _send_payload(self, payload, packet_no=0):
         if self.sock is None:
             self._open_socket()
@@ -662,7 +737,7 @@ class ZdtEmm42:
             return data[2] == self._checksum(data[:2])
         return False
 
-    def _query_sync(self, cmd, extra=b'', timeout=None):
+    def _query_sync(self, cmd, extra=b'', timeout=None, send_long=False):
         # Synchronous request/response for interactive g-code commands only. Blocking
         # briefly here is acceptable because it runs from a g-code handler, not the
         # periodic poll. The periodic path is fully asynchronous (_handle_rx).
@@ -673,7 +748,10 @@ class ZdtEmm42:
         # Discard any stale frames still queued before we send.
         while self._read_one_frame() is not None:
             pass
-        self._send_command(cmd, extra)
+        if send_long:
+            self._send_long_command(cmd, extra)
+        else:
+            self._send_command(cmd, extra)
         deadline = time.monotonic() + timeout
         while True:
             remain = deadline - time.monotonic()
@@ -717,6 +795,72 @@ class ZdtEmm42:
                     return None
                 return bytearray(data)
 
+    def _query_long_sync(self, cmd, extra=b'', response_len=None, timeout=None):
+        """Send a short request and reassemble a repeated-command CAN response."""
+        if response_len is None:
+            raise ValueError('response_len is required for a long response')
+        if timeout is None:
+            timeout = self.query_timeout
+        if self.sock is None:
+            self._open_socket()
+        while self._read_one_frame() is not None:
+            pass
+        self._send_command(cmd, extra)
+        deadline = time.monotonic() + timeout
+        expected_tail_len = response_len - 2  # address and command are omitted
+        tail = bytearray()
+        expected_packet = 0
+        while True:
+            remain = deadline - time.monotonic()
+            if remain <= 0.0:
+                self.last_error = "timeout waiting for long response to cmd 0x%02X" % cmd
+                return None
+            r, _, _ = select.select([self.sock], [], [], remain)
+            if not r:
+                self.last_error = "timeout waiting for long response to cmd 0x%02X" % cmd
+                return None
+            frame = self._read_one_frame()
+            if frame is None:
+                continue
+            kind, value = frame
+            if kind != 'frame':
+                self.ignored_frames += 1
+                self.last['ignored_frames'] = self.ignored_frames
+                continue
+            arb_id, raw = value
+            if (arb_id >> 8) != self.addr:
+                self.ext_other_frames += 1
+                self._record_ignored_frame('extended-other', arb_id, raw)
+                self.ignored_frames += 1
+                self.last['ignored_frames'] = self.ignored_frames
+                continue
+            data = self._normalize_long_packet(raw, cmd)
+            if len(data) >= 3 and data[0] == 0x00 and data[1] == 0xEE:
+                self.last_error = "device returned EE for cmd 0x%02X" % cmd
+                return None
+            if not data or data[0] != (cmd & 0xFF):
+                continue
+            packet_no = arb_id & 0xFF
+            if packet_no != expected_packet:
+                self.last_error = (
+                    "out-of-order long response packet for cmd 0x%02X: "
+                    "expected %d got %d" % (cmd, expected_packet, packet_no))
+                return None
+            tail.extend(data[1:])
+            expected_packet += 1
+            if len(tail) < expected_tail_len:
+                continue
+            if len(tail) != expected_tail_len:
+                self.last_error = "invalid long response length for cmd 0x%02X" % cmd
+                return None
+            normalized = bytearray([self.addr, cmd & 0xFF]) + tail
+            self.last['last_rx_id'] = "0x%08X" % arb_id
+            self.last['last_rx_payload'] = ' '.join('%02X' % b for b in raw)
+            if not self._verify_checksum(normalized):
+                self.last_error = "bad check byte for long cmd 0x%02X" % cmd
+                return None
+            return normalized
+
     def _normalize_response(self, data, cmd):
         # Serial-style responses include the address: 01 24 5C 6A 6B. Over CAN the
         # address is usually omitted because the frame id already carries it:
@@ -730,7 +874,15 @@ class ZdtEmm42:
 
     def _parse_response(self, cmd, data):
         parsed = False
-        if cmd == CMD_VOLTAGE and len(data) >= 5:
+        if cmd == CMD_READ_PID and len(data) >= PID_RESPONSE_LEN:
+            self.last['pid_kp'] = _u32(data, 2)
+            self.last['pid_ki'] = _u32(data, 6)
+            self.last['pid_kd'] = _u32(data, 10)
+            parsed = True
+        elif cmd == CMD_WRITE_PID and len(data) >= 4:
+            self.last['pid_write_status'] = data[2]
+            parsed = data[2] != 0x00
+        elif cmd == CMD_VOLTAGE and len(data) >= 5:
             self.last['voltage_mv'] = _u16(data, 2)
             parsed = True
         elif cmd == CMD_CURRENT and len(data) >= 5:
@@ -796,6 +948,346 @@ class ZdtEmm42:
 
     def _counts_to_mm(self, counts):
         return counts * self.rotation_distance / 65536.0
+
+    def _read_pid(self, timeout=None):
+        data = self._query_long_sync(
+            CMD_READ_PID, response_len=PID_RESPONSE_LEN, timeout=timeout)
+        if data is None:
+            return None
+        eventtime = self.reactor.monotonic()
+        if not self._record_valid_response(CMD_READ_PID, data, eventtime):
+            self.last_error = 'invalid position PID response'
+            return None
+        return (
+            int(self.last['pid_kp']),
+            int(self.last['pid_ki']),
+            int(self.last['pid_kd']),
+        )
+
+    def _write_pid(self, pid, store=0, verify=True, timeout=None):
+        if len(pid) != 3:
+            raise ValueError('PID must contain Kp, Ki and Kd')
+        if store not in (0, 1):
+            raise ValueError('PID store flag must be 0 or 1')
+        extra = bytearray([PID_WRITE_SUBCOMMAND, store])
+        for value in pid:
+            extra.extend(_pack_u32(value))
+        data = self._query_sync(
+            CMD_WRITE_PID, bytes(extra), timeout=timeout, send_long=True)
+        if data is None:
+            return False
+        if not self._record_valid_response(
+                CMD_WRITE_PID, data, self.reactor.monotonic()):
+            self.last_error = 'invalid position PID write response'
+            return False
+        if verify:
+            readback = self._read_pid(timeout)
+            if readback != tuple(int(value) for value in pid):
+                self.last_error = (
+                    'position PID readback mismatch: expected %s got %s' %
+                    (self._format_pid(pid), self._format_pid(readback)))
+                return False
+        return True
+
+    def _format_pid(self, pid):
+        if pid is None:
+            return 'None'
+        return 'Kp=%d Ki=%d Kd=%d' % tuple(int(value) for value in pid)
+
+    def _set_polling_enabled(self, enabled):
+        if self.timer is None:
+            self.timer = self.reactor.register_timer(self._poll_timer)
+        if self.error_timer is None:
+            self.error_timer = self.reactor.register_timer(self._error_poll_timer)
+        self.enabled = bool(enabled)
+        if not self.enabled:
+            self.pending_cmd = None
+            self.pending_error_cmd = None
+            self.last['online'] = False
+        waketime = self.reactor.NOW if self.enabled else self.reactor.NEVER
+        self.reactor.update_timer(self.timer, waketime)
+        self.reactor.update_timer(self.error_timer, waketime)
+
+    def _check_autotune_preconditions(self, gcmd, axis):
+        if self.can_payload_includes_addr:
+            raise gcmd.error(
+                "ZDT_EMM_AUTOTUNE requires can_payload_includes_addr=False; "
+                "the CAN address belongs in the extended CAN ID")
+        toolhead = self.printer.lookup_object('toolhead', None)
+        if toolhead is None:
+            raise gcmd.error('ZDT_EMM_AUTOTUNE requires the Klipper toolhead object')
+        print_stats = self.printer.lookup_object('print_stats', None)
+        if print_stats is not None:
+            state = str(print_stats.get_status(self.reactor.monotonic()).get(
+                'state', '')).lower()
+            if state not in ('standby', 'complete', 'cancelled', 'error'):
+                raise gcmd.error(
+                    'ZDT_EMM_AUTOTUNE requires an idle printer (state=%s)' % state)
+        toolhead_status = toolhead.get_status(self.reactor.monotonic())
+        if axis in ('x', 'y', 'z') and axis not in str(
+                toolhead_status.get('homed_axes', '')).lower():
+            raise gcmd.error(
+                'axis %s must be homed before ZDT_EMM_AUTOTUNE' % axis.upper())
+        # Do not append the calibration moves behind an already queued manual
+        # move.  The print-state check above covers the normal case; this wait
+        # also handles a just-finished jog or macro.
+        toolhead.wait_moves()
+        data = self._query_sync(CMD_POS_ERROR, timeout=self.query_timeout)
+        if data is None or not self._record_valid_response(
+                CMD_POS_ERROR, data, self.reactor.monotonic()):
+            raise gcmd.error(
+                "ZDT_EMM_AUTOTUNE CAN preflight failed: %s" % self.last_error)
+        if not self.get_status(self.reactor.monotonic()).get('online'):
+            raise gcmd.error(
+                "ZDT_EMM_AUTOTUNE CAN device is offline: %s" % self.last_error)
+        pid = self._read_pid()
+        if pid is None:
+            raise gcmd.error(
+                "ZDT_EMM_AUTOTUNE PID read failed: %s" % self.last_error)
+        # A same-value STORE=0 write proves the long-request framing and the
+        # device's run-time write path before any exploratory candidate is used.
+        if not self._write_pid(pid, store=0, verify=True):
+            raise gcmd.error(
+                "ZDT_EMM_AUTOTUNE PID temporary-write validation failed: %s" %
+                self.last_error)
+        return toolhead, pid
+
+    def _run_autotune_motion(self, toolhead, axis_index, distance, speed,
+                             settle_time, start_time):
+        origin = list(toolhead.get_position())
+        target = list(origin)
+        target[axis_index] += distance
+        returned = False
+        try:
+            toolhead.manual_move(target, speed)
+            toolhead.wait_moves()
+            toolhead.manual_move(origin, speed)
+            toolhead.wait_moves()
+            returned = True
+        finally:
+            if not returned:
+                try:
+                    toolhead.manual_move(origin, speed)
+                    toolhead.wait_moves()
+                except Exception:
+                    logging.exception(
+                        'zdt_emm42 %s: failed to return after autotune motion',
+                        self.name)
+        if settle_time > 0.0:
+            self.reactor.pause(self.reactor.monotonic() + settle_time)
+        end_time = self.reactor.monotonic()
+        self._prune_error_history(end_time)
+        return [dict(sample) for sample in self.error_history
+                    if start_time <= sample['time'] <= end_time]
+
+    def _score_error_samples(self, samples):
+        if len(samples) < self.autotune_min_samples:
+            return None
+        errors = [float(sample['error_deg']) for sample in samples]
+        squared = [value * value for value in errors]
+        rms = math.sqrt(sum(squared) / float(len(squared)))
+        peak = max(abs(value) for value in errors)
+        signs = []
+        for value in errors:
+            if value > 0.0:
+                signs.append(1)
+            elif value < 0.0:
+                signs.append(-1)
+        sign_changes = sum(1 for before, after in zip(signs, signs[1:])
+                           if before != after)
+        overshoot = 0.0
+        if sign_changes:
+            first_sign = signs[0] if signs else 0
+            crossed = False
+            for value in errors:
+                if not crossed and value * first_sign < 0.0:
+                    crossed = True
+                if crossed:
+                    overshoot = max(overshoot, abs(value))
+        threshold = max(0.01, peak * 0.10)
+        last_above = 0
+        for index, value in enumerate(errors):
+            if abs(value) > threshold:
+                last_above = index
+        settling_time = max(
+            0.0, float(samples[last_above]['time']) - float(samples[0]['time']))
+        score = (rms + 0.50 * peak + 0.10 * overshoot +
+                 0.05 * peak * sign_changes + 0.01 * settling_time)
+        return {
+            'score': score,
+            'rms': rms,
+            'peak': peak,
+            'overshoot': overshoot,
+            'settling_time': settling_time,
+            'samples': len(samples),
+        }
+
+    def _next_pid_candidate(self, current, parameter, direction, step):
+        candidate = list(current)
+        value = candidate[parameter] + direction * step
+        if value < self.autotune_pid_min or value > self.autotune_pid_max:
+            direction = -direction
+            value = candidate[parameter] + direction * step
+        value = max(self.autotune_pid_min,
+                    min(self.autotune_pid_max, int(value)))
+        if value == candidate[parameter]:
+            return None, direction
+        candidate[parameter] = value
+        return tuple(candidate), direction
+
+    def _autotune_info(self, gcmd, iteration, pid, metrics, accepted):
+        if metrics is None:
+            gcmd.respond_info(
+                'ZDT Emm42 autotune iteration %d: %s invalid (%s)' %
+                (iteration, self._format_pid(pid), self.last_error))
+            return
+        gcmd.respond_info(
+            'ZDT Emm42 autotune iteration %d: %s score=%.6f rms=%.6f '
+            'peak=%.6f overshoot=%.6f settling=%.3fs samples=%d %s' % (
+                iteration, self._format_pid(pid), metrics['score'],
+                metrics['rms'], metrics['peak'], metrics['overshoot'],
+                metrics['settling_time'], metrics['samples'],
+                'accepted' if accepted else 'rejected'))
+
+    def cmd_AUTOTUNE(self, gcmd):
+        if self.autotune_active:
+            raise gcmd.error('ZDT_EMM_AUTOTUNE is already running')
+        axis = gcmd.get('AXIS', '').strip().lower()
+        if axis not in ('x', 'y', 'z', 'e'):
+            raise gcmd.error('AXIS must be one of X, Y, Z or E')
+        distance = gcmd.get_float('DISTANCE', minval=0.001, maxval=100.0)
+        speed = gcmd.get_float('SPEED', minval=0.001, maxval=1000.0)
+        accel = gcmd.get_float('ACCEL', minval=0.001, maxval=100000.0)
+        iterations = gcmd.get_int('ITERATIONS', minval=1, maxval=1000)
+        if gcmd.get_int('CONFIRM', 0, minval=0, maxval=1) != 1:
+            raise gcmd.error(
+                'ZDT_EMM_AUTOTUNE moves the selected axis; pass CONFIRM=1')
+        settle_time = gcmd.get_float(
+            'SETTLE', self.autotune_settle_time, minval=0.0, maxval=30.0)
+        steps = [
+            gcmd.get_int('KP_STEP', self.autotune_kp_step, minval=1,
+                         maxval=PID_MAX_VALUE),
+            gcmd.get_int('KI_STEP', self.autotune_ki_step, minval=1,
+                         maxval=PID_MAX_VALUE),
+            gcmd.get_int('KD_STEP', self.autotune_kd_step, minval=1,
+                         maxval=PID_MAX_VALUE),
+        ]
+        axis_index = {'x': 0, 'y': 1, 'z': 2, 'e': 3}[axis]
+        was_enabled = self.enabled
+        saved_accel = None
+        original = None
+        current = None
+        self.autotune_active = True
+        self.autotune_abort = False
+        try:
+            self._set_polling_enabled(True)
+            toolhead, original = self._check_autotune_preconditions(gcmd, axis)
+            current = tuple(original)
+            saved_accel = getattr(toolhead, 'max_accel', None)
+            if saved_accel is not None:
+                toolhead.max_accel = min(float(saved_accel), accel)
+
+            baseline_start = self.reactor.monotonic()
+            baseline_samples = self._run_autotune_motion(
+                toolhead, axis_index, distance, speed, settle_time,
+                baseline_start)
+            baseline = self._score_error_samples(baseline_samples)
+            if baseline is None:
+                raise gcmd.error(
+                    'ZDT_EMM_AUTOTUNE baseline has too few valid error samples')
+            best = baseline
+            directions = [1, 1, 1]
+            failed = [0, 0, 0]
+            gcmd.respond_info(
+                'ZDT Emm42 autotune baseline: %s score=%.6f rms=%.6f '
+                'peak=%.6f samples=%d' % (
+                    self._format_pid(current), best['score'], best['rms'],
+                    best['peak'], best['samples']))
+
+            for iteration in range(1, iterations + 1):
+                if self.autotune_abort:
+                    raise gcmd.error('ZDT_EMM_AUTOTUNE aborted')
+                parameter = (iteration - 1) % 3
+                candidate, directions[parameter] = self._next_pid_candidate(
+                    current, parameter, directions[parameter], steps[parameter])
+                if candidate is None:
+                    failed[parameter] += 1
+                    steps[parameter] = max(1, steps[parameter] // 2)
+                    directions[parameter] *= -1
+                    self._autotune_info(
+                        gcmd, iteration, current, None, False)
+                    continue
+                if not self._write_pid(candidate, store=0, verify=True):
+                    raise gcmd.error(
+                        'temporary PID write failed at iteration %d: %s' %
+                        (iteration, self.last_error))
+                before_errors = self.error_count
+                sample_start = self.reactor.monotonic()
+                samples = self._run_autotune_motion(
+                    toolhead, axis_index, distance, speed, settle_time,
+                    sample_start)
+                if self.error_count != before_errors or not self.get_status(
+                        self.reactor.monotonic()).get('online'):
+                    metrics = None
+                    self.last_error = 'CAN error or offline during motion'
+                elif self.last.get('stalled'):
+                    metrics = None
+                    self.last_error = 'motor reported stall during motion'
+                else:
+                    metrics = self._score_error_samples(samples)
+                    if metrics is None:
+                        self.last_error = 'too few valid error samples'
+                accepted = metrics is not None and metrics['score'] < best['score']
+                if accepted:
+                    current = candidate
+                    best = metrics
+                    failed[parameter] = 0
+                else:
+                    if not self._write_pid(current, store=0, verify=True):
+                        raise gcmd.error(
+                            'failed to restore PID after iteration %d: %s' %
+                            (iteration, self.last_error))
+                    directions[parameter] *= -1
+                    failed[parameter] += 1
+                    if failed[parameter] >= 2:
+                        steps[parameter] = max(1, steps[parameter] // 2)
+                        failed[parameter] = 0
+                self._autotune_info(gcmd, iteration, candidate, metrics, accepted)
+
+            if not self._write_pid(current, store=1, verify=True):
+                self._write_pid(original, store=1, verify=False)
+                raise gcmd.error(
+                    'failed to persist best PID; restored original where possible: %s' %
+                    self.last_error)
+            final_pid = self._read_pid()
+            if final_pid != tuple(current):
+                self._write_pid(original, store=1, verify=False)
+                raise gcmd.error(
+                    'final PID readback mismatch; restored original where possible')
+            gcmd.respond_info(
+                'ZDT Emm42 autotune complete: original %s; best %s; '
+                'score=%.6f; stored in driver without Klipper restart' % (
+                    self._format_pid(original), self._format_pid(current),
+                    best['score']))
+        except Exception:
+            if original is not None:
+                try:
+                    self._write_pid(original, store=0, verify=False)
+                except Exception:
+                    logging.exception(
+                        'zdt_emm42 %s: failed to restore original PID', self.name)
+            raise
+        finally:
+            if saved_accel is not None:
+                try:
+                    toolhead.max_accel = saved_accel
+                except Exception:
+                    logging.exception(
+                        'zdt_emm42 %s: failed to restore acceleration', self.name)
+            if not was_enabled:
+                self._set_polling_enabled(False)
+            self.autotune_abort = False
+            self.autotune_active = False
 
     def _open_csv(self, path=None):
         if path:
@@ -877,6 +1369,9 @@ class ZdtEmm42:
                 self._fmt(l.get('realtime_target_deg')), self._fmt(l.get('realtime_target_mm'))),
             "actual=%s deg / %s mm" % (self._fmt(l.get('actual_deg')), self._fmt(l.get('actual_mm'))),
             "error=%s deg / %s mm" % (self._fmt(l.get('error_deg')), self._fmt(l.get('error_mm'))),
+            "pid: Kp=%s Ki=%s Kd=%s write_status=%s" % (
+                l.get('pid_kp'), l.get('pid_ki'), l.get('pid_kd'),
+                l.get('pid_write_status')),
             "flags: enabled=%s reached=%s stalled=%s stall_protect=%s" % (
                 l.get('enabled'), l.get('reached'), l.get('stalled'), l.get('stall_protect')),
             "home: encoder_ready=%s calibration_ready=%s homing=%s home_failed=%s" % (
@@ -904,7 +1399,13 @@ class ZdtEmm42:
             raise gcmd.error("DATA must be hex bytes, e.g. DATA=6C or DATA=\"6C 00\"")
         if len(extra) > 6:
             raise gcmd.error("DATA too long for a single short frame")
-        data = self._query_sync(cmd, extra, self.query_timeout)
+        if cmd == CMD_READ_PID:
+            if extra:
+                raise gcmd.error('CMD 0x21 does not accept DATA')
+            data = self._query_long_sync(
+                cmd, response_len=PID_RESPONSE_LEN, timeout=self.query_timeout)
+        else:
+            data = self._query_sync(cmd, extra, self.query_timeout)
         if data is None:
             raise gcmd.error("No valid response for cmd 0x%02X: %s" % (cmd, self.last_error))
         if not self._record_valid_response(cmd, data, self.reactor.monotonic()):
@@ -974,18 +1475,7 @@ class ZdtEmm42:
 
     def cmd_POLL(self, gcmd):
         enable = gcmd.get_int('ENABLE', 1, minval=0, maxval=1)
-        self.enabled = bool(enable)
-        if self.timer is None:
-            self.timer = self.reactor.register_timer(self._poll_timer)
-        if self.error_timer is None:
-            self.error_timer = self.reactor.register_timer(self._error_poll_timer)
-        if not self.enabled:
-            self.pending_cmd = None
-            self.pending_error_cmd = None
-            self.last['online'] = False
-        waketime = self.reactor.NOW if self.enabled else self.reactor.NEVER
-        self.reactor.update_timer(self.timer, waketime)
-        self.reactor.update_timer(self.error_timer, waketime)
+        self._set_polling_enabled(bool(enable))
         gcmd.respond_info("ZDT Emm42 '%s' polling %s" % (self.name, 'enabled' if self.enabled else 'disabled'))
 
     def _fmt(self, value):

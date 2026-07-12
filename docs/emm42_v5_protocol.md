@@ -1,6 +1,6 @@
 # Emm42_V5.0 / ZDT_X42_V1.2 闭环驱动器协议与功能说明
 
-本文只描述张大头 Emm42_V5.0（采用 ZDT_X42_V1.2 硬件框架）驱动器本身的功能、接口和自定义通讯协议，不描述任何上位机软件架构、运动控制软件、自动调参流程或上层命令封装。
+本文第 1–10 节描述张大头 Emm42_V5.0（采用 ZDT_X42_V1.2 硬件框架）驱动器本身的功能、接口和自定义通讯协议；第 11–12 节补充仓库中的 Klipper 监控与在线 PID 调参封装。
 
 本文依据仓库中的 [`Emm.pdf`](../Emm.pdf)（Rev1.3，2023-11-20）整理。手册没有定义的内容会明确标为“待验证”；“待验证”不应当作为协议实现的确定依据。
 
@@ -825,7 +825,7 @@ CAN 广播请求对应 `CAN_ID=0x0000`（第 0 包）、payload=`F6 00 05 DC 0A 
 
 ## 11. Klipper 位置误差实时监控
 
-仓库中的 `[zdt_emm42 <name>]` Klipper extra 使用 Linux SocketCAN 读取 EMM42 的运行参数。运动仍由 Klipper 的 STEP/DIR/EN 控制，插件只发送短读取命令。
+仓库中的 `[zdt_emm42 <name>]` Klipper extra 使用 Linux SocketCAN 读取 EMM42 的运行参数。正常监控时运动仍由 Klipper 的 STEP/DIR/EN 控制，插件只发送短读取命令；显式执行第 12 节的自动调参命令时，插件才会通过 Klipper toolhead 执行用户确认的测试运动并发送 PID 写入命令。
 
 ### 11.1 `0x37` 独立采样
 
@@ -867,3 +867,47 @@ error_deg = sign × raw_value × 360 / 65536
 配套的 `mainsail-toolchanger` 会自动识别单个 `[zdt_emm42 <name>]` 对象，并在 Dashboard 提供可折叠、可排序且持久化布局的“EMM42 位置误差”面板。面板使用 `error_history` 绘制最近 5 秒滚动曲线，横轴为相对秒数，纵轴为角度 `°`，零线单独标出，同时显示当前值、5 秒最大绝对误差、采样周期和 CAN 在线状态。
 
 未配置 `zdt_emm42` 时面板显示配置提示；配置存在但没有有效响应时显示离线提示，并且不绘制伪造零值。曲线窗口与 CSV 日志相互独立：曲线始终只看最近 5 秒，而 CSV 仍由 `csv_path`、`ZDT_EMM_LOG ENABLE=1` 和 `ZDT_EMM_LOG ENABLE=0` 控制。
+
+## 12. Klipper 在线 PID 自动调参
+
+仓库中的 Klipper extra 提供一个显式运动测试命令，只调整 EMM42 的位置环 PID（`0x21`/`0x4A`），不修改 `0x48` 驱动配置：
+
+```gcode
+ZDT_EMM_AUTOTUNE NAME=shadow_a AXIS=X DISTANCE=10 SPEED=20 ACCEL=200 ITERATIONS=20 CONFIRM=1
+```
+
+命令要求打印机空闲、指定轴（X/Y/Z）已经回零、CAN 设备在线，并要求 `CONFIRM=1`。`E` 轴可以作为显式测试轴使用，但不具备 X/Y/Z 的回零状态检查。`DISTANCE` 是单方向往返距离；每轮执行“当前位置 → 正方向距离 → 原位置”的运动，并等待 `autotune_settle_time` 后再结束本轮采样。
+
+### 12.1 CAN PID 读写流程
+
+自动调参只在以下配置下运行：
+
+```ini
+can_payload_includes_addr: False
+```
+
+地址必须放在扩展 CAN ID，不能重复放进 payload。命令开始时先读取 `0x21` 当前 Kp、Ki、Kd，然后用相同参数发送一次 `0x4A`、`STORE=0` 的临时写入，并再次读取 `0x21` 校验。验证失败会在任何运动发生前终止。
+
+`0x4A` 的 CAN 长请求沿用第 3.3 节的分包规则。以位置环 PID 为例，串口逻辑报文为：
+
+```text
+01 4A C3 STORE KP[4] KI[4] KD[4] 6B
+```
+
+地址从 payload 移到 CAN ID 后，每个 CAN payload 都重复 `4A`，每包最多携带 7 个后续字节，校验字节只放在最后一包。`0x21` 的 15 字节响应也按相同的“功能码重复、CAN ID 低字节为包号”规则重组；如果设备返回乱序、长度错误、超时、错误响应或校验失败，读写均视为失败。
+
+### 12.2 搜索和评分
+
+`ITERATIONS` 表示在线搜索轮数。基准值测试完成后，插件按 Kp、Ki、Kd 循环，每轮只改变一个 PID 参数，使用当前步长和方向生成下一候选值，并立即用 `STORE=0` 写入和回读。运动结束后仅使用该轮时间范围内新产生的 `error_history` 样本计算评分；候选改善评分则保留，否则恢复最后一组有效 PID、反转方向，连续失败后减小步长。
+
+评分综合以下指标：
+
+- 误差 RMS；
+- 最大绝对误差；
+- 误差过零后的超调；
+- 进入误差阈值的稳定时间；
+- 过零次数、CAN 错误、离线和电机堵转会造成拒绝或惩罚。
+
+默认步长可以在 `[zdt_emm42]` 中设置：`autotune_kp_step`、`autotune_ki_step`、`autotune_kd_step`；单次命令也可以用 `KP_STEP`、`KI_STEP`、`KD_STEP` 覆盖。`autotune_min_samples` 控制每轮最少有效误差样本数。
+
+搜索结束后，评分最佳值使用 `0x4A STORE=1` 直接写入驱动器内部存储，并回读确认。该写入不修改 `printer.cfg`，不要求重启 Klipper；如果运动、CAN、回读或最终持久化失败，插件会尽力把原始 PID 写回运行时，并输出失败原因。

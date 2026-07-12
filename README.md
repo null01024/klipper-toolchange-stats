@@ -26,7 +26,7 @@
 
 ## ZDT EMM42 闭环位置误差监控
 
-仓库中的 `klipper/extras/zdt_emm42.py` 可通过 SocketCAN 读取 ZDT EMM42_V5 闭环驱动器的运行参数，并在 Mainsail Dashboard 显示位置误差实时曲线。它不接管 Klipper 的 STEP/DIR/EN 运动控制，只发送读取命令。
+仓库中的 `klipper/extras/zdt_emm42.py` 可通过 SocketCAN 读取 ZDT EMM42_V5 闭环驱动器的运行参数，并在 Mainsail Dashboard 显示位置误差实时曲线。正常监控不接管 Klipper 的 STEP/DIR/EN 运动控制；只有显式执行 `ZDT_EMM_AUTOTUNE` 时，才会在用户确认的轴上执行测试运动并写入位置环 PID。
 
 ### Klipper 配置
 
@@ -70,3 +70,21 @@ error_deg = sign × raw_value × 360 / 65536
 `get_status()` 还提供 `last_update_time`、`online`、`error_count` 和 `error_history`。`error_history` 只保留最近 5 秒内校验通过的位置误差样本；超时、错误响应和校验失败不会追加零值或其它伪造点。5 秒是曲线滚动显示窗口，不是 CSV 累计日志长度，CSV 是否启用仍由 `csv_path` 或 `ZDT_EMM_LOG` 独立控制。
 
 安装对应的 `mainsail-toolchanger` 前端并重启 Klipper 后，Dashboard 会出现“EMM42 位置误差”面板。面板显示当前误差、最近 5 秒最大绝对误差、采样状态、CAN 在线状态和带零线的角度曲线；没有 `[zdt_emm42]` 配置或驱动器离线时会显示明确提示。现有 `ZDT_EMM_STATUS`、`ZDT_EMM_QUERY`、`ZDT_EMM_SNIFF`、`ZDT_EMM_LOG` 和 `ZDT_EMM_POLL` 命令继续可用。
+
+### 闭环 PID 自动调参
+
+在确认电机有安全运动空间、轴已经回零且打印机空闲后，可以让插件通过 CAN 在线搜索 EMM42 的位置环 PID：
+
+```gcode
+ZDT_EMM_AUTOTUNE NAME=shadow_a AXIS=X DISTANCE=10 SPEED=20 ACCEL=200 ITERATIONS=20 CONFIRM=1
+```
+
+命令每轮执行一次正反往返运动，按本轮新采集的误差 RMS、峰值、超调和稳定时间评分；候选 PID 使用 `0x4A` 的 `STORE=0` 立即写入并回读，搜索结束后最佳值使用 `STORE=1` 写入 EMM42 内部存储。这个过程不修改 `printer.cfg`，也不需要重启 Klipper。默认步长可通过 `[zdt_emm42]` 的 `autotune_kp_step`、`autotune_ki_step` 和 `autotune_kd_step` 调整，运行时也可传 `KP_STEP`、`KI_STEP`、`KD_STEP`。
+
+命令必须使用 CAN 正确的地址承载方式：
+
+```ini
+can_payload_includes_addr: False
+```
+
+如果仍为 `True`，插件会在运动前拒绝调参，避免把 `01 4A ...` 这种串口形态误发到 CAN payload。首次调参会先读取当前 PID，再使用相同 PID 做一次 `STORE=0` 长帧写入和回读验证；`0x21` 长响应或 `0x4A` 长请求验证失败时不会开始运动。
