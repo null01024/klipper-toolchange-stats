@@ -79,6 +79,12 @@ def make_monitor():
     monitor.autotune_min_samples = 3
     monitor.autotune_pid_min = 0
     monitor.autotune_pid_max = 0xFFFFFFFF
+    monitor.autotune_capture_active = False
+    monitor.autotune_capture_phase = None
+    monitor.autotune_capture_samples = []
+    monitor.autotune_max_error_deg = None
+    monitor.autotune_safety_violation = None
+    monitor.autotune_abort = False
     monitor.last = monitor._empty_status()
     monitor.sock = CaptureSocket()
     return monitor
@@ -199,6 +205,101 @@ class ZdtEmm42Test(unittest.TestCase):
         self.assertGreater(metrics['overshoot'], 0.0)
         self.assertEqual(candidate, (67000, 100, 62000))
         self.assertEqual(direction, 1)
+
+    def test_corexy_phase_score_separates_motion_and_settle(self):
+        monitor = make_monitor()
+        samples = [
+            {'phase': 'motion:x', 'error_deg': 1.0},
+            {'phase': 'motion:y', 'error_deg': -1.0},
+            {'phase': 'motion:diag', 'error_deg': 2.0},
+            {'phase': 'motion:return', 'error_deg': 0.5},
+            {'phase': 'settle', 'error_deg': 0.1},
+            {'phase': 'settle', 'error_deg': -0.2},
+        ]
+
+        metrics = monitor._score_print_samples(samples)
+
+        self.assertIsNotNone(metrics)
+        self.assertAlmostEqual(metrics['motion_rms'], 1.25)
+        self.assertEqual(metrics['motion_p95'], 2.0)
+        self.assertEqual(metrics['motion_peak'], 2.0)
+        self.assertLess(metrics['settle_rms'], 0.2)
+
+    def test_corexy_route_covers_both_diagonals_and_returns_origin(self):
+        monitor = make_monitor()
+        origin = [100.0, 100.0, 5.0, 0.0]
+
+        route = monitor._corexy_route(origin, 10.0)
+        labels = [label for label, _ in route]
+
+        self.assertIn('diag_return', labels)
+        self.assertIn('diag_x_minus_y', labels)
+        self.assertEqual(route[-1][1], origin)
+        self.assertTrue(all(point[0] >= origin[0] and point[1] >= origin[1]
+                            for _, point in route))
+
+    def test_corexy_aggregate_uses_repeat_median(self):
+        monitor = make_monitor()
+
+        def metrics(score):
+            return {
+                'score': score,
+                'motion_rms': score,
+                'motion_p95': score,
+                'motion_peak': score,
+                'settle_rms': score,
+                'samples': 10,
+            }
+
+        aggregate = monitor._aggregate_print_metrics([
+            (0.4, [metrics(1.0), metrics(100.0), metrics(2.0)]),
+            (1.0, [metrics(3.0), metrics(4.0), metrics(5.0)]),
+        ])
+
+        self.assertAlmostEqual(aggregate['score'], 3.0)
+        self.assertEqual(aggregate['samples'], 60)
+
+    def test_autotune_capture_is_independent_of_ui_five_second_window(self):
+        monitor = make_monitor()
+        monitor.autotune_capture_active = True
+        monitor.autotune_capture_phase = 'motion:test'
+        monitor.autotune_max_error_deg = 100.0
+
+        for eventtime in range(8):
+            monitor.last['error_deg'] = float(eventtime)
+            monitor.last['error_counts'] = eventtime
+            monitor._append_error_sample(float(eventtime))
+
+        self.assertEqual(len(monitor.autotune_capture_samples), 8)
+        self.assertTrue(all(sample['time'] >= 2.0
+                            for sample in monitor.error_history))
+        self.assertTrue(all(sample['phase'] == 'motion:test'
+                            for sample in monitor.autotune_capture_samples))
+
+    def test_corexy_max_error_marks_candidate_for_rejection(self):
+        monitor = make_monitor()
+        monitor.autotune_capture_active = True
+        monitor.autotune_capture_phase = 'motion:test'
+        monitor.autotune_max_error_deg = 1.0
+        monitor.last['error_deg'] = 1.5
+        monitor.last['error_counts'] = 10
+
+        monitor._append_error_sample(1.0)
+
+        with self.assertRaises(ZDT.AutotuneCandidateRejected):
+            monitor._check_autotune_runtime_safety()
+
+    def test_bounded_pid_candidate_stays_inside_parameter_range(self):
+        monitor = make_monitor()
+        bounds = [(20000, 30000), (0, 200), (20000, 30000)]
+
+        high = monitor._bounded_pid_candidate(
+            (29000, 100, 26000), 0, 5000, bounds)
+        low = monitor._bounded_pid_candidate(
+            (21000, 100, 26000), 0, -5000, bounds)
+
+        self.assertEqual(high, (30000, 100, 26000))
+        self.assertEqual(low, (20000, 100, 26000))
 
     def test_long_packet_normalization_drops_address_only_once(self):
         monitor = make_monitor()

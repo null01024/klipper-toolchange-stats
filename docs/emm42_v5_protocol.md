@@ -896,9 +896,9 @@ can_payload_includes_addr: False
 
 地址从 payload 移到 CAN ID 后，每个 CAN payload 都重复 `4A`，每包最多携带 7 个后续字节，校验字节只放在最后一包。`0x21` 的 15 字节响应也按相同的“功能码重复、CAN ID 低字节为包号”规则重组；如果设备返回乱序、长度错误、超时、错误响应或校验失败，读写均视为失败。
 
-### 12.2 搜索和评分
+### 12.2 单轴兼容模式的搜索和评分
 
-`ITERATIONS` 表示在线搜索轮数。基准值测试完成后，插件按 Kp、Ki、Kd 循环，每轮只改变一个 PID 参数，使用当前步长和方向生成下一候选值，并立即用 `STORE=0` 写入和回读。运动结束后仅使用该轮时间范围内新产生的 `error_history` 样本计算评分；候选改善评分则保留，否则恢复最后一组有效 PID、反转方向，连续失败后减小步长。
+未指定 `PROFILE` 或显式使用 `PROFILE=AXIS` 时，`ITERATIONS` 表示在线搜索轮数。基准值测试完成后，插件按 Kp、Ki、Kd 循环，每轮只改变一个 PID 参数，使用当前步长和方向生成下一候选值，并立即用 `STORE=0` 写入和回读。运动结束后仅使用该轮时间范围内新产生的 `error_history` 样本计算评分；候选改善评分则保留，否则恢复最后一组有效 PID、反转方向，连续失败后减小步长。
 
 评分综合以下指标：
 
@@ -911,3 +911,30 @@ can_payload_includes_addr: False
 默认步长可以在 `[zdt_emm42]` 中设置：`autotune_kp_step`、`autotune_ki_step`、`autotune_kd_step`；单次命令也可以用 `KP_STEP`、`KI_STEP`、`KD_STEP` 覆盖。`autotune_min_samples` 控制每轮最少有效误差样本数，`pid_write_settle_time` 控制 `0x4A` 响应后等待驱动器内部参数生效的时间。每次回读最多重试三次，避免驱动器确认写入但尚未立即反映到 `0x21` 读取结果时中断搜索。
 
 搜索结束后，评分最佳值使用 `0x4A STORE=1` 直接写入驱动器内部存储，并回读确认。该写入不修改 `printer.cfg`，不要求重启 Klipper；如果运动、CAN、回读或最终持久化失败，插件会尽力把原始 PID 写回运行时，并输出失败原因。
+
+### 12.3 CoreXY 打印工况模式
+
+单轴兼容模式只评价一组固定往返运动。CoreXY 打印机应使用：
+
+```gcode
+ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=10 SPEED=200 ACCEL=5000 ITERATIONS=20 REPEATS=3 MAX_ERROR_DEG=5 CONFIRM=1
+```
+
+`SPEED` 和 `ACCEL` 是实际切片最高打印参数。插件自动生成 40%、70%、100% 三档测试，轨迹位于当前位置的正 X/正 Y 方形区域，覆盖 X、Y、`X+Y`、`X-Y` 和连续拐角。X/Y 必须均已回零，且正方向必须具有 `DISTANCE` 指定的安全空间。
+
+CoreXY 模式在每个 PID 候选下重复每档工况，默认 `REPEATS=3`，使用中位数降低机械噪声和 CAN 采样相位的影响。调参期间暂停普通遥测轮询，`0x37` 使用独立 20 ms 采样周期和独立内存缓冲；因此测试超过 5 秒时也不会被 Dashboard 历史窗口裁掉。
+
+每个样本按运动和停止稳定阶段标记，正常方向变化不再作为超调。单次评分为：
+
+```text
+score = 0.50 × motion_rms
+      + 0.30 × motion_p95
+      + 0.15 × motion_peak
+      + 0.05 × settle_rms
+```
+
+三档工况等权平均。候选分数至少改善 `MIN_IMPROVEMENT`（默认 `0.02`，即 2%）才被接受。每次迭代对当前 Kp、Ki 或 Kd 同时评价正负两个步长；完成 Kp/Ki/Kd 一轮后步长减半，连续两轮无显著改善时提前收敛。
+
+Kp/Kd 默认边界为原始值的 `0.5–2.0` 倍，Ki 默认边界为 `0–max(原始值×10, 原始值+10×KI_STEP)`。命令可使用 `KP_MIN/KP_MAX`、`KI_MIN/KI_MAX`、`KD_MIN/KD_MAX` 覆盖，但边界必须包含原始值。
+
+搜索完成后，插件分别用原始值和候选最佳值运行未参与搜索的 55%、85% 档及不同顺序轨迹。验证改善不足 2% 时恢复原始 PID，不写入芯片；验证通过后才执行 `STORE=1`。`MAX_ERROR_DEG` 是必填硬门槛，误差越线会拒绝候选，CAN 离线或堵转会终止调参。`ZDT_EMM_AUTOTUNE_CANCEL NAME=<name>` 可请求取消，当前运动段完成后恢复参数。
