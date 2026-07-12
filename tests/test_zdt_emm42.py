@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import struct
 import unittest
 from collections import deque
@@ -41,6 +42,9 @@ class ReplySocket(CaptureSocket):
 
 
 class FakeReactor:
+    NOW = 0.0
+    NEVER = 1.0e30
+
     def __init__(self):
         self.now = 10.0
         self.pauses = []
@@ -51,6 +55,40 @@ class FakeReactor:
     def pause(self, waketime):
         self.pauses.append(waketime)
         self.now = max(self.now, waketime)
+
+    def update_timer(self, timer, waketime):
+        pass
+
+
+class FakeCommandError(Exception):
+    pass
+
+
+class FakeGcmd:
+    def __init__(self, values):
+        self.values = values
+        self.messages = []
+
+    def get(self, name, default=None):
+        return self.values.get(name, default)
+
+    def get_float(self, name, default=None, **kwargs):
+        value = self.values.get(name, default)
+        if value is None:
+            raise FakeCommandError('missing ' + name)
+        return float(value)
+
+    def get_int(self, name, default=None, **kwargs):
+        value = self.values.get(name, default)
+        if value is None:
+            raise FakeCommandError('missing ' + name)
+        return int(value)
+
+    def error(self, message):
+        return FakeCommandError(message)
+
+    def respond_info(self, message):
+        self.messages.append(message)
 
 
 def make_monitor():
@@ -238,6 +276,89 @@ class ZdtEmm42Test(unittest.TestCase):
         self.assertTrue(all(point[0] >= origin[0] and point[1] >= origin[1]
                             for _, point in route))
 
+    def test_corexy_corner_route_uses_ten_mm_segments(self):
+        monitor = make_monitor()
+        origin = [20.0, 30.0, 5.0, 0.0]
+
+        route = monitor._corexy_route(origin, 100.0, profile='corner')
+
+        self.assertEqual(len(route), 40)
+        self.assertEqual(route[-1][1], origin)
+        previous = origin
+        for _, point in route:
+            self.assertLessEqual(
+                math.hypot(point[0] - previous[0],
+                           point[1] - previous[1]), 10.000001)
+            self.assertGreaterEqual(point[0], origin[0])
+            self.assertLessEqual(point[0], origin[0] + 100.0)
+            self.assertGreaterEqual(point[1], origin[1])
+            self.assertLessEqual(point[1], origin[1] + 100.0)
+            previous = point
+
+    def test_corexy_curve_route_has_32_segments_and_stays_in_square(self):
+        monitor = make_monitor()
+        origin = [20.0, 30.0, 5.0, 0.0]
+
+        route = monitor._corexy_route(origin, 100.0, profile='curve')
+
+        self.assertEqual(len(route), 34)
+        self.assertEqual(route[-1][1], origin)
+        self.assertTrue(all(
+            origin[0] <= point[0] <= origin[0] + 100.0 and
+            origin[1] <= point[1] <= origin[1] + 100.0
+            for _, point in route))
+
+    def test_corexy_route_is_flushed_once_for_continuous_lookahead(self):
+        monitor = make_monitor()
+
+        class Toolhead:
+            def __init__(self):
+                self.moves = []
+                self.wait_count = 0
+
+            def manual_move(self, target, speed):
+                self.moves.append((target, speed))
+
+            def wait_moves(self):
+                self.wait_count += 1
+
+        toolhead = Toolhead()
+        route = monitor._corexy_route(
+            [0.0, 0.0, 0.0, 0.0], 100.0, profile='corner')
+
+        monitor._queue_corexy_route(toolhead, route, 200.0, 'corner')
+
+        self.assertEqual(len(toolhead.moves), len(route))
+        self.assertEqual(toolhead.wait_count, 1)
+        self.assertEqual(monitor.autotune_capture_phase, 'motion:corner')
+
+    def test_corexy_motion_limits_use_official_setter_and_restore_all(self):
+        monitor = make_monitor()
+        monitor.reactor = FakeReactor()
+
+        class Toolhead:
+            def __init__(self):
+                self.values = [300.0, 10000.0, 5.0, 0.5]
+                self.calls = []
+
+            def get_status(self, eventtime):
+                return dict(zip((
+                    'max_velocity', 'max_accel', 'square_corner_velocity',
+                    'minimum_cruise_ratio'), self.values))
+
+            def set_max_velocities(self, velocity, accel, scv, cruise):
+                self.values = [velocity, accel, scv, cruise]
+                self.calls.append(tuple(self.values))
+
+        toolhead = Toolhead()
+        saved = monitor._set_corexy_motion_limits(toolhead, 200.0, 5000.0)
+        monitor._restore_corexy_motion_limits(toolhead, saved)
+
+        self.assertEqual(toolhead.calls, [
+            (200.0, 5000.0, 5.0, 0.5),
+            (300.0, 10000.0, 5.0, 0.5),
+        ])
+
     def test_corexy_aggregate_uses_repeat_median(self):
         monitor = make_monitor()
 
@@ -258,6 +379,27 @@ class ZdtEmm42Test(unittest.TestCase):
 
         self.assertAlmostEqual(aggregate['score'], 3.0)
         self.assertEqual(aggregate['samples'], 60)
+
+    def test_corexy_aggregate_weights_profiles_equally(self):
+        monitor = make_monitor()
+
+        def metrics(score):
+            return {
+                'score': score, 'motion_rms': score,
+                'motion_p95': score, 'motion_peak': score,
+                'settle_rms': score, 'samples': 10,
+            }
+
+        aggregate = monitor._aggregate_print_metrics([
+            (1.0, 'long', [metrics(1.0)]),
+            (1.0, 'corner', [metrics(2.0)]),
+            (1.0, 'curve', [metrics(9.0)]),
+        ])
+
+        self.assertAlmostEqual(aggregate['score'], 4.0)
+        self.assertEqual(
+            [tier['profile'] for tier in aggregate['tiers']],
+            ['long', 'corner', 'curve'])
 
     def test_autotune_capture_is_independent_of_ui_five_second_window(self):
         monitor = make_monitor()
@@ -288,6 +430,49 @@ class ZdtEmm42Test(unittest.TestCase):
 
         with self.assertRaises(ZDT.AutotuneCandidateRejected):
             monitor._check_autotune_runtime_safety()
+
+    def test_corexy_baseline_safety_rejection_is_command_error(self):
+        monitor = make_monitor()
+        monitor.reactor = FakeReactor()
+        monitor.printer = type(
+            'Printer', (), {'command_error': FakeCommandError})()
+        monitor.enabled = False
+        monitor.timer = object()
+        monitor.error_timer = object()
+        monitor.autotune_active = False
+        monitor.autotune_settle_time = 0.5
+        monitor.autotune_kp_step = 5000
+        monitor.autotune_ki_step = 20
+        monitor.autotune_kd_step = 5000
+        toolhead = type('Toolhead', (), {
+            'max_accel': 10000.0,
+            'get_status': lambda self, eventtime: {'homed_axes': 'xyz'},
+        })()
+        original = (26000, 10, 26000)
+        restored = []
+
+        def set_polling(enabled):
+            monitor.enabled = enabled
+
+        monitor._set_polling_enabled = set_polling
+        monitor._check_autotune_preconditions = (
+            lambda gcmd, axis: (toolhead, original))
+        monitor._check_corexy_workspace = lambda *_args: None
+        monitor._corexy_pid_bounds = lambda *_args: [
+            (13000, 52000), (0, 210), (13000, 52000)]
+        monitor._evaluate_corexy_profile = lambda *_args, **_kwargs: (
+            (_ for _ in ()).throw(ZDT.AutotuneCandidateRejected(
+                'position error 5.289917 deg exceeded MAX_ERROR_DEG 5.000000')))
+        monitor._write_pid = lambda pid, store=0, verify=True: (
+            restored.append((tuple(pid), store)) or True)
+        gcmd = FakeGcmd({'CONFIRM': 1})
+
+        with self.assertRaisesRegex(
+                FakeCommandError, 'COREXY_PRINT baseline rejected'):
+            monitor._cmd_AUTOTUNE_COREXY(gcmd)
+
+        self.assertIn((original, 0), restored)
+        self.assertFalse(monitor.autotune_active)
 
     def test_bounded_pid_candidate_stays_inside_parameter_range(self):
         monitor = make_monitor()

@@ -82,14 +82,14 @@ ZDT_EMM_AUTOTUNE NAME=shadow_a AXIS=X DISTANCE=10 SPEED=20 ACCEL=200 ITERATIONS=
 上述 `PROFILE=AXIS`（默认）模式保留原有单轴正反往返行为。CoreXY 打印机建议使用打印工况模式：
 
 ```gcode
-ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=10 SPEED=200 ACCEL=5000 ITERATIONS=20 REPEATS=3 MAX_ERROR_DEG=5 CONFIRM=1
+ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=100 SPEED=200 ACCEL=5000 ITERATIONS=20 REPEATS=3 MAX_ERROR_DEG=6.5 CONFIRM=1
 ```
 
-`SPEED`、`ACCEL` 应填写切片中实际使用的最高打印值。插件自动使用 40%、70%、100% 三档速度/加速度，运行覆盖 X、Y、`X+Y`、`X-Y` 和连续拐角的 CoreXY 轨迹；每个工况默认重复三次并取中位数。调参使用独立 20 ms 采样缓冲，不受 Dashboard 5 秒历史窗口影响，评分由运动 RMS、P95、峰值和停止后 RMS 组成。
+以上数值也是 CoreXY 模式的默认值；当前位置向正 X、正 Y 各需保留 100 mm 安全空间。`SPEED`、`ACCEL` 应填写切片中实际使用的最高打印值。插件自动使用 40%、70%、100% 三档速度/加速度，并在每档执行 100 mm 长线/对角线、10 mm 连续直角折线和 32 段圆周三类轨迹。每类轨迹整体进入 Klipper 前瞻队列，只在轨迹块结束时等待，因此拐角速度与真实打印更接近。每个“速度档 × 轨迹”工况默认重复三次取中位数，所有工况等权评分。调参使用独立 20 ms 采样缓冲，不受 Dashboard 5 秒历史窗口影响，评分由运动 RMS、P95、峰值和停止后 RMS 组成。
 
 候选 PID 使用 `0x4A STORE=0` 写入并回读，Kp/Kd 默认限制在原始值的 `0.5–2.0` 倍，Ki 默认限制在 `0–max(原始值×10, 原始值+10×KI_STEP)`；也可用 `KP_MIN/KP_MAX`、`KI_MIN/KI_MAX`、`KD_MIN/KD_MAX` 覆盖。候选至少改善 2% 才会接受，搜索结束后还会使用 55%、85% 档和不同轨迹进行独立验证，通过后才以 `STORE=1` 写入电机。这个过程不修改 `printer.cfg`，也不需要重启 Klipper。
 
-`MAX_ERROR_DEG` 是 CoreXY 模式的必填安全门槛；任一采样越线、CAN 离线或驱动器报告堵转时会拒绝或终止测试并恢复参数。可发送 `ZDT_EMM_AUTOTUNE_CANCEL NAME=shadow_a` 请求取消，当前运动段结束后恢复原始 PID。默认步长可通过 `autotune_kp_step`、`autotune_ki_step`、`autotune_kd_step` 调整，`pid_write_settle_time` 控制 CAN 写入后的等待时间。
+`MAX_ERROR_DEG` 默认 `6.5°`，是 CoreXY 模式的安全门槛；任一采样越线、CAN 离线或驱动器报告堵转时会拒绝或终止测试并恢复参数。可发送 `ZDT_EMM_AUTOTUNE_CANCEL NAME=shadow_a` 请求取消，当前轨迹块结束后恢复原始 PID。默认步长可通过 `autotune_kp_step`、`autotune_ki_step`、`autotune_kd_step` 调整，`pid_write_settle_time` 控制 CAN 写入后的等待时间。
 
 命令必须使用 CAN 正确的地址承载方式：
 

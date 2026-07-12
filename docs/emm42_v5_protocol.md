@@ -917,12 +917,14 @@ can_payload_includes_addr: False
 单轴兼容模式只评价一组固定往返运动。CoreXY 打印机应使用：
 
 ```gcode
-ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=10 SPEED=200 ACCEL=5000 ITERATIONS=20 REPEATS=3 MAX_ERROR_DEG=5 CONFIRM=1
+ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=100 SPEED=200 ACCEL=5000 ITERATIONS=20 REPEATS=3 MAX_ERROR_DEG=6.5 CONFIRM=1
 ```
 
-`SPEED` 和 `ACCEL` 是实际切片最高打印参数。插件自动生成 40%、70%、100% 三档测试，轨迹位于当前位置的正 X/正 Y 方形区域，覆盖 X、Y、`X+Y`、`X-Y` 和连续拐角。X/Y 必须均已回零，且正方向必须具有 `DISTANCE` 指定的安全空间。
+`DISTANCE=100`、`SPEED=200`、`ACCEL=5000`、`ITERATIONS=20` 和 `MAX_ERROR_DEG=6.5` 均为默认值。`SPEED` 和 `ACCEL` 是实际切片最高打印参数。插件自动生成 40%、70%、100% 三档测试；每档包含 100 mm 长线/对角线、步长不超过 10 mm 的连续直角折线，以及 32 段圆周。轨迹位于当前位置的正 X/正 Y 方形区域。X/Y 必须均已回零，且正方向必须具有 `DISTANCE` 指定的安全空间。
 
-CoreXY 模式在每个 PID 候选下重复每档工况，默认 `REPEATS=3`，使用中位数降低机械噪声和 CAN 采样相位的影响。调参期间暂停普通遥测轮询，`0x37` 使用独立 20 ms 采样周期和独立内存缓冲；因此测试超过 5 秒时也不会被 Dashboard 历史窗口裁掉。
+每类轨迹的全部移动会先加入 Klipper 前瞻队列，并且只在整个轨迹块结束时调用一次等待，使连续拐角不会被逐段强制停住。测试前通过 Klipper 的运动限制接口临时设置速度和加速度，结束后同时恢复最大速度、最大加速度、拐角速度和最小巡航比例。
+
+CoreXY 模式在每个 PID 候选下重复每个“速度档 × 轨迹”工况，默认 `REPEATS=3`，使用中位数降低机械噪声和 CAN 采样相位的影响，然后对所有工况等权平均。调参期间暂停普通遥测轮询，`0x37` 使用独立 20 ms 采样周期和独立内存缓冲；因此测试超过 5 秒时也不会被 Dashboard 历史窗口裁掉。
 
 每个样本按运动和停止稳定阶段标记，正常方向变化不再作为超调。单次评分为：
 
@@ -933,8 +935,8 @@ score = 0.50 × motion_rms
       + 0.05 × settle_rms
 ```
 
-三档工况等权平均。候选分数至少改善 `MIN_IMPROVEMENT`（默认 `0.02`，即 2%）才被接受。每次迭代对当前 Kp、Ki 或 Kd 同时评价正负两个步长；完成 Kp/Ki/Kd 一轮后步长减半，连续两轮无显著改善时提前收敛。
+三档速度与三类轨迹组成的九个工况等权平均。候选分数至少改善 `MIN_IMPROVEMENT`（默认 `0.02`，即 2%）才被接受。每次迭代对当前 Kp、Ki 或 Kd 同时评价正负两个步长；完成 Kp/Ki/Kd 一轮后步长减半，连续两轮无显著改善时提前收敛。
 
 Kp/Kd 默认边界为原始值的 `0.5–2.0` 倍，Ki 默认边界为 `0–max(原始值×10, 原始值+10×KI_STEP)`。命令可使用 `KP_MIN/KP_MAX`、`KI_MIN/KI_MAX`、`KD_MIN/KD_MAX` 覆盖，但边界必须包含原始值。
 
-搜索完成后，插件分别用原始值和候选最佳值运行未参与搜索的 55%、85% 档及不同顺序轨迹。验证改善不足 2% 时恢复原始 PID，不写入芯片；验证通过后才执行 `STORE=1`。`MAX_ERROR_DEG` 是必填硬门槛，误差越线会拒绝候选，CAN 离线或堵转会终止调参。`ZDT_EMM_AUTOTUNE_CANCEL NAME=<name>` 可请求取消，当前运动段完成后恢复参数。
+搜索完成后，插件分别用原始值和候选最佳值运行未参与搜索的 55%、85% 档，并反转或错开三类轨迹。验证改善不足 2% 时恢复原始 PID，不写入芯片；验证通过后才执行 `STORE=1`。`MAX_ERROR_DEG` 是硬门槛，误差越线会拒绝候选，CAN 离线或堵转会终止调参。`ZDT_EMM_AUTOTUNE_CANCEL NAME=<name>` 可请求取消，当前轨迹块完成后恢复参数。

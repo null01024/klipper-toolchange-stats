@@ -35,7 +35,7 @@
 #   ZDT_EMM_LOG    NAME=shadow_a ENABLE=0
 #   ZDT_EMM_POLL   NAME=shadow_a ENABLE=1
 #   ZDT_EMM_AUTOTUNE NAME=shadow_a AXIS=X DISTANCE=10 SPEED=20 ACCEL=200 ITERATIONS=20 CONFIRM=1
-#   ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=10 SPEED=200 ACCEL=5000 ITERATIONS=20 REPEATS=3 MAX_ERROR_DEG=5 CONFIRM=1
+#   ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=100 SPEED=200 ACCEL=5000 ITERATIONS=20 REPEATS=3 MAX_ERROR_DEG=6.5 CONFIRM=1
 #   ZDT_EMM_AUTOTUNE_CANCEL NAME=shadow_a
 #
 # Notes:
@@ -1230,10 +1230,20 @@ class ZdtEmm42:
         fields = ('score', 'motion_rms', 'motion_p95', 'motion_peak',
                   'settle_rms')
         tier_metrics = []
-        for factor, repeats in scenarios:
+        normalized = []
+        for scenario in scenarios:
+            if len(scenario) == 2:
+                factor, repeats = scenario
+                profile = 'legacy'
+            else:
+                factor, profile, repeats = scenario
             if not repeats:
                 return None
-            aggregate = {'factor': factor, 'repeats': len(repeats)}
+            normalized.append((factor, profile, repeats))
+            aggregate = {
+                'factor': factor, 'profile': profile,
+                'repeats': len(repeats),
+            }
             for field in fields:
                 aggregate[field] = self._median(
                     [metrics[field] for metrics in repeats])
@@ -1246,7 +1256,8 @@ class ZdtEmm42:
             result[field] = sum(
                 metrics[field] for metrics in tier_metrics) / len(tier_metrics)
         result['samples'] = sum(
-            metrics['samples'] for _, repeats in scenarios for metrics in repeats)
+            metrics['samples'] for _, _, repeats in normalized
+            for metrics in repeats)
         result['spread'] = max(metrics['spread'] for metrics in tier_metrics)
         return result
 
@@ -1281,9 +1292,65 @@ class ZdtEmm42:
                 raise AutotuneCandidateRejected(violation)
             raise RuntimeError(violation)
 
-    def _corexy_route(self, origin, distance, validation=False):
+    def _corexy_route(self, origin, distance, validation=False,
+                      profile='long'):
+        if profile not in ('long', 'corner', 'curve'):
+            raise ValueError('unknown CoreXY print profile %s' % profile)
         x, y = origin[0], origin[1]
-        if validation:
+        if profile == 'corner':
+            step = min(10.0, distance)
+            count = max(1, int(math.floor(distance / step)))
+            step = distance / float(count)
+            points = []
+            if validation:
+                for index in range(1, count + 1):
+                    points.append(('corner_y_%d' % index,
+                                   x + (index - 1) * step,
+                                   y + index * step))
+                    points.append(('corner_x_%d' % index,
+                                   x + index * step,
+                                   y + index * step))
+                for index in range(count - 1, -1, -1):
+                    points.append(('corner_y_return_%d' % index,
+                                   x + (index + 1) * step,
+                                   y + index * step))
+                    points.append(('corner_x_return_%d' % index,
+                                   x + index * step,
+                                   y + index * step))
+            else:
+                for index in range(1, count + 1):
+                    points.append(('corner_x_%d' % index,
+                                   x + index * step,
+                                   y + (index - 1) * step))
+                    points.append(('corner_y_%d' % index,
+                                   x + index * step,
+                                   y + index * step))
+                for index in range(count - 1, -1, -1):
+                    points.append(('corner_x_return_%d' % index,
+                                   x + index * step,
+                                   y + (index + 1) * step))
+                    points.append(('corner_y_return_%d' % index,
+                                   x + index * step,
+                                   y + index * step))
+        elif profile == 'curve':
+            segments = 32
+            center_x = x + distance * 0.5
+            center_y = y + distance * 0.5
+            radius = distance * 0.5
+            direction = -1.0 if validation else 1.0
+            # Enter near the left midpoint of the circle.  This keeps the
+            # non-circular lead-in and return inside half of DISTANCE instead
+            # of adding a long diagonal across the test square.
+            offset = (math.pi + math.pi / segments
+                      if validation else math.pi)
+            points = []
+            for index in range(segments + 1):
+                angle = offset + direction * 2.0 * math.pi * index / segments
+                points.append(('curve_%02d' % index,
+                               center_x + radius * math.cos(angle),
+                               center_y + radius * math.sin(angle)))
+            points.append(('curve_return', x, y))
+        elif validation:
             points = [
                 ('diag_xy', x + distance, y + distance),
                 ('x_reverse', x, y + distance),
@@ -1338,22 +1405,49 @@ class ZdtEmm42:
                 'COREXY_PRINT test square exceeds configured X/Y workspace')
         return origin
 
+    def _set_corexy_motion_limits(self, toolhead, speed, accel):
+        status = toolhead.get_status(self.reactor.monotonic())
+        saved = (
+            float(status['max_velocity']),
+            float(status['max_accel']),
+            float(status['square_corner_velocity']),
+            float(status['minimum_cruise_ratio']),
+        )
+        if not hasattr(toolhead, 'set_max_velocities'):
+            raise RuntimeError(
+                'Klipper toolhead does not provide set_max_velocities()')
+        toolhead.set_max_velocities(
+            min(saved[0], float(speed)),
+            min(saved[1], float(accel)),
+            saved[2], saved[3])
+        return saved
+
+    def _restore_corexy_motion_limits(self, toolhead, saved):
+        if saved is not None:
+            toolhead.set_max_velocities(saved[0], saved[1], saved[2], saved[3])
+
+    def _queue_corexy_route(self, toolhead, route, speed, profile):
+        self.autotune_capture_phase = 'motion:' + profile
+        for _, target in route:
+            toolhead.manual_move(target, speed)
+        # Flush once per complete profile so Klipper can calculate junction
+        # velocities across all adjacent segments using its lookahead queue.
+        toolhead.wait_moves()
+        self._check_autotune_runtime_safety()
+
     def _run_corexy_print_sample(self, toolhead, distance, speed, accel,
                                  settle_time, max_error_deg,
-                                 validation=False):
+                                 validation=False, profile='long'):
         origin = self._check_corexy_workspace(toolhead, distance)
-        saved_accel = getattr(toolhead, 'max_accel', None)
+        saved_limits = None
         returned = False
         self._begin_autotune_capture(max_error_deg)
         try:
-            if saved_accel is not None:
-                toolhead.max_accel = min(float(saved_accel), float(accel))
-            for label, target in self._corexy_route(
-                    origin, distance, validation=validation):
-                self.autotune_capture_phase = 'motion:' + label
-                toolhead.manual_move(target, speed)
-                toolhead.wait_moves()
-                self._check_autotune_runtime_safety()
+            saved_limits = self._set_corexy_motion_limits(
+                toolhead, speed, accel)
+            route = self._corexy_route(
+                origin, distance, validation=validation, profile=profile)
+            self._queue_corexy_route(toolhead, route, speed, profile)
             returned = True
             self.autotune_capture_phase = 'settle'
             self.reactor.pause(self.reactor.monotonic() + settle_time)
@@ -1370,8 +1464,7 @@ class ZdtEmm42:
             samples = [dict(sample)
                        for sample in self.autotune_capture_samples]
             self._end_autotune_capture()
-            if saved_accel is not None:
-                toolhead.max_accel = saved_accel
+            self._restore_corexy_motion_limits(toolhead, saved_limits)
         if not self.get_status(self.reactor.monotonic()).get('online'):
             raise RuntimeError('CAN device went offline during CoreXY autotune')
         flags = self._query_sync(CMD_MOTOR_FLAGS, timeout=self.query_timeout)
@@ -1392,15 +1485,16 @@ class ZdtEmm42:
                                  repeats, factors, validation=False):
         scenarios = []
         for factor in factors:
-            results = []
-            for _ in range(repeats):
-                results.append(self._run_corexy_print_sample(
-                    toolhead, distance,
-                    max(0.001, max_speed * factor),
-                    max(0.001, max_accel * factor),
-                    settle_time, max_error_deg,
-                    validation=validation))
-            scenarios.append((factor, results))
+            for profile in ('long', 'corner', 'curve'):
+                results = []
+                for _ in range(repeats):
+                    results.append(self._run_corexy_print_sample(
+                        toolhead, distance,
+                        max(0.001, max_speed * factor),
+                        max(0.001, max_accel * factor),
+                        settle_time, max_error_deg,
+                        validation=validation, profile=profile))
+                scenarios.append((factor, profile, results))
         return self._aggregate_print_metrics(scenarios)
 
     def _corexy_pid_bounds(self, gcmd, original, steps):
@@ -1448,19 +1542,24 @@ class ZdtEmm42:
         tiers = metrics.get('tiers', [])
         if tiers:
             summary += ' tiers=[' + ', '.join(
-                '%d%%:%.6f' % (int(round(tier['factor'] * 100)),
-                               tier['score'])
+                '%d%%-%s:%.6f' % (
+                    int(round(tier['factor'] * 100)),
+                    tier.get('profile', 'legacy'), tier['score'])
                 for tier in tiers) + ']'
         return summary
 
     def _cmd_AUTOTUNE_COREXY(self, gcmd):
-        distance = gcmd.get_float('DISTANCE', minval=0.1, maxval=100.0)
-        max_speed = gcmd.get_float('SPEED', minval=0.1, maxval=1000.0)
-        max_accel = gcmd.get_float('ACCEL', minval=1.0, maxval=100000.0)
-        iterations = gcmd.get_int('ITERATIONS', minval=1, maxval=1000)
+        distance = gcmd.get_float(
+            'DISTANCE', 100.0, minval=0.1, maxval=100.0)
+        max_speed = gcmd.get_float(
+            'SPEED', 200.0, minval=0.1, maxval=1000.0)
+        max_accel = gcmd.get_float(
+            'ACCEL', 5000.0, minval=1.0, maxval=100000.0)
+        iterations = gcmd.get_int(
+            'ITERATIONS', 20, minval=1, maxval=1000)
         repeats = gcmd.get_int('REPEATS', 3, minval=1, maxval=5)
         max_error_deg = gcmd.get_float(
-            'MAX_ERROR_DEG', minval=0.001, maxval=360.0)
+            'MAX_ERROR_DEG', 6.5, minval=0.001, maxval=360.0)
         min_improvement = gcmd.get_float(
             'MIN_IMPROVEMENT', 0.02, minval=0.0, maxval=0.50)
         settle_time = gcmd.get_float(
@@ -1481,7 +1580,6 @@ class ZdtEmm42:
         original_history_maxlen = self.error_history.maxlen
         original = None
         toolhead = None
-        saved_accel = None
         general_timer_paused = False
         persist_attempted = False
         self.autotune_active = True
@@ -1500,7 +1598,6 @@ class ZdtEmm42:
                 raise gcmd.error(
                     'X and Y must both be homed for PROFILE=COREXY_PRINT')
             self._check_corexy_workspace(toolhead, distance)
-            saved_accel = getattr(toolhead, 'max_accel', None)
             bounds = self._corexy_pid_bounds(gcmd, original, steps)
 
             # Dedicated tuning capture owns the 0x37 timer.  The slower general
@@ -1511,9 +1608,14 @@ class ZdtEmm42:
                                  AUTOTUNE_SAMPLE_INTERVAL)) + 2))
 
             current = tuple(original)
-            baseline = self._evaluate_corexy_profile(
-                toolhead, distance, max_speed, max_accel, settle_time,
-                max_error_deg, repeats, (0.40, 0.70, 1.00))
+            try:
+                baseline = self._evaluate_corexy_profile(
+                    toolhead, distance, max_speed, max_accel, settle_time,
+                    max_error_deg, repeats, (0.40, 0.70, 1.00))
+            except AutotuneCandidateRejected as exc:
+                raise gcmd.error(
+                    'COREXY_PRINT baseline rejected: %s. Increase '
+                    'MAX_ERROR_DEG or reduce SPEED/ACCEL' % exc)
             if baseline is None:
                 raise gcmd.error('COREXY_PRINT baseline produced no metrics')
             best = baseline
@@ -1594,9 +1696,13 @@ class ZdtEmm42:
                 raise gcmd.error(
                     'failed to prepare original PID validation: %s' %
                     self.last_error)
-            original_validation = self._evaluate_corexy_profile(
-                toolhead, distance, max_speed, max_accel, settle_time,
-                max_error_deg, repeats, (0.55, 0.85), validation=True)
+            try:
+                original_validation = self._evaluate_corexy_profile(
+                    toolhead, distance, max_speed, max_accel, settle_time,
+                    max_error_deg, repeats, (0.55, 0.85), validation=True)
+            except AutotuneCandidateRejected as exc:
+                raise gcmd.error(
+                    'original PID validation exceeded safety limit: %s' % exc)
             if not self._write_pid(current, store=0, verify=True):
                 raise gcmd.error(
                     'failed to prepare best PID validation: %s' %
@@ -1641,7 +1747,7 @@ class ZdtEmm42:
                     self._format_pid(original), self._format_pid(current),
                     self._format_print_metrics(best),
                     self._format_print_metrics(best_validation)))
-        except Exception:
+        except self.printer.command_error:
             if original is not None:
                 try:
                     self._write_pid(
@@ -1652,14 +1758,25 @@ class ZdtEmm42:
                         'zdt_emm42 %s: failed to restore original CoreXY PID',
                         self.name)
             raise
+        except Exception as exc:
+            if original is not None:
+                try:
+                    self._write_pid(
+                        original, store=1 if persist_attempted else 0,
+                        verify=False)
+                except Exception:
+                    logging.exception(
+                        'zdt_emm42 %s: failed to restore original CoreXY PID',
+                        self.name)
+            logging.exception(
+                'zdt_emm42 %s: unexpected CoreXY autotune failure', self.name)
+            raise gcmd.error('COREXY_PRINT autotune failed safely: %s' % exc)
         finally:
             if self.autotune_capture_active:
                 self._end_autotune_capture()
             self.error_poll_interval = original_interval
             self._prune_error_history(self.reactor.monotonic())
             self._resize_error_history(original_history_maxlen)
-            if saved_accel is not None and toolhead is not None:
-                toolhead.max_accel = saved_accel
             if general_timer_paused and was_enabled:
                 self.enabled = True
                 self.reactor.update_timer(self.timer, self.reactor.NOW)
@@ -1831,7 +1948,7 @@ class ZdtEmm42:
                 'score=%.6f; stored in driver without Klipper restart' % (
                     self._format_pid(original), self._format_pid(current),
                     best['score']))
-        except Exception:
+        except self.printer.command_error:
             if original is not None:
                 try:
                     self._write_pid(original, store=0, verify=False)
@@ -1839,6 +1956,16 @@ class ZdtEmm42:
                     logging.exception(
                         'zdt_emm42 %s: failed to restore original PID', self.name)
             raise
+        except Exception as exc:
+            if original is not None:
+                try:
+                    self._write_pid(original, store=0, verify=False)
+                except Exception:
+                    logging.exception(
+                        'zdt_emm42 %s: failed to restore original PID', self.name)
+            logging.exception(
+                'zdt_emm42 %s: unexpected axis autotune failure', self.name)
+            raise gcmd.error('ZDT_EMM_AUTOTUNE failed safely: %s' % exc)
         finally:
             if saved_accel is not None:
                 try:
