@@ -14,6 +14,7 @@
 #   can_filter: ext            # off | ext (default) | addr
 #   checksum_mode: 0x6B        # 0x6B (default) | xor | crc8 (crc8 unverified)
 #   poll_interval: 0.10
+#   error_poll_interval: 0.10  # independent 0x37 position-error sample period
 #   query_timeout: 0.006
 #   rotation_distance: 40
 #   microsteps: 16             # MUST match the driver's MStep setting (driver default is 16)
@@ -37,7 +38,9 @@
 # - It intentionally avoids motion commands and only issues short read commands.
 
 import csv
+from collections import deque
 import logging
+import math
 import os
 import select
 import socket
@@ -66,6 +69,8 @@ CMD_POS_ERROR = 0x37         # addr 37 sign u32 6B
 CMD_MOTOR_FLAGS = 0x3A       # addr 3A flags 6B
 CMD_HOME_FLAGS = 0x3B        # addr 3B flags 6B
 
+ERROR_HISTORY_SECONDS = 5.0
+
 READ_COMMANDS = [
     CMD_VOLTAGE,
     CMD_CURRENT,
@@ -79,6 +84,11 @@ READ_COMMANDS = [
     CMD_MOTOR_FLAGS,
     CMD_HOME_FLAGS,
 ]
+
+# Position error is sampled by its own timer.  Keep it in READ_COMMANDS so the
+# diagnostic sniffer still exercises the complete set of read commands, but do
+# not let the slower general telemetry round-robin determine its sample rate.
+GENERAL_READ_COMMANDS = [cmd for cmd in READ_COMMANDS if cmd != CMD_POS_ERROR]
 
 
 def _u16(data, index):
@@ -149,7 +159,11 @@ class ZdtEmm42:
         self.checksum_mode = self._parse_checksum_mode(config)
         self.can_filter = self._parse_can_filter(config)
         self.poll_interval = config.getfloat('poll_interval', 0.10, above=0.0)
+        self.error_poll_interval = config.getfloat(
+            'error_poll_interval', 0.10, above=0.0)
         self.query_timeout = config.getfloat('query_timeout', 0.006, above=0.0)
+        self.offline_timeout = config.getfloat(
+            'offline_timeout', max(1.0, self.error_poll_interval * 3.0), above=0.0)
         self.rotation_distance = config.getfloat('rotation_distance', 40.0, above=0.0)
         # microsteps must match the driver's MStep setting (driver default is 16).
         self.microsteps = config.getint('microsteps', 16, minval=1)
@@ -160,10 +174,17 @@ class ZdtEmm42:
         self.sock = None
         self.fd_handle = None
         self.timer = None
+        self.error_timer = None
         self.enabled = False
         self.query_index = 0
         self.pending_cmd = None
         self.pending_since = 0.0
+        self.pending_error_cmd = None
+        self.pending_error_since = 0.0
+        self.error_history = deque(
+            maxlen=max(2, int(math.ceil(ERROR_HISTORY_SECONDS /
+                                        self.error_poll_interval)) + 2))
+        self.last_error_update_time = None
         self.last = self._empty_status()
         self.error_count = 0
         self.ignored_frames = 0
@@ -224,6 +245,8 @@ class ZdtEmm42:
             'can_interface': getattr(self, 'can_interface', ''),
             'addr': getattr(self, 'addr', 0),
             'last_update_time': 0.0,
+            'error_poll_interval': getattr(self, 'error_poll_interval', 0.10),
+            'error_history': [],
             'voltage_mv': None,
             'current_ma': None,
             'encoder_counts': None,
@@ -273,9 +296,13 @@ class ZdtEmm42:
         try:
             self._open_socket()
             self.enabled = self.auto_start
-            self.timer = self.reactor.register_timer(self._poll_timer)
+            if self.timer is None:
+                self.timer = self.reactor.register_timer(self._poll_timer)
+            if self.error_timer is None:
+                self.error_timer = self.reactor.register_timer(self._error_poll_timer)
             waketime = self.reactor.NOW if self.enabled else self.reactor.NEVER
             self.reactor.update_timer(self.timer, waketime)
+            self.reactor.update_timer(self.error_timer, waketime)
             self.last_error = "ok"
         except Exception as e:
             self.enabled = False
@@ -284,6 +311,12 @@ class ZdtEmm42:
 
     def _handle_disconnect(self):
         self.enabled = False
+        self.pending_cmd = None
+        self.pending_error_cmd = None
+        if self.timer is not None:
+            self.reactor.update_timer(self.timer, self.reactor.NEVER)
+        if self.error_timer is not None:
+            self.reactor.update_timer(self.error_timer, self.reactor.NEVER)
         self._close_csv()
         self._unregister_fd()
         if self.sock is not None:
@@ -292,6 +325,14 @@ class ZdtEmm42:
             except Exception:
                 pass
             self.sock = None
+        self.last_error_update_time = None
+        self.error_history.clear()
+        self.last['error_history'] = []
+        self.last['online'] = False
+        self.last['last_update_time'] = 0.0
+        self.last['error_counts'] = None
+        self.last['error_deg'] = None
+        self.last['error_mm'] = None
 
     def _open_socket(self):
         if self.sock is not None:
@@ -341,25 +382,50 @@ class ZdtEmm42:
                     self.pending_cmd = None
                 else:
                     return eventtime + self.poll_interval
-            cmd = READ_COMMANDS[self.query_index % len(READ_COMMANDS)]
+            cmd = GENERAL_READ_COMMANDS[self.query_index % len(GENERAL_READ_COMMANDS)]
             self.query_index += 1
             self._send_command(cmd)
             self.pending_cmd = cmd
             self.pending_since = eventtime
         except Exception as e:
-            self.error_count += 1
-            self.last['error_count'] = self.error_count
-            self.last_error = str(e)
-            self.last['last_error'] = self.last_error
+            self._register_error_failure(str(e))
             self.pending_cmd = None
             logging.exception("zdt_emm42 %s: poll failed", self.name)
         return eventtime + self.poll_interval
 
+    def _error_poll_timer(self, eventtime):
+        if not self.enabled:
+            return self.reactor.NEVER
+        try:
+            if self.pending_error_cmd is not None:
+                if eventtime - self.pending_error_since >= self.query_timeout:
+                    self._register_no_response(self.pending_error_cmd)
+                    self.pending_error_cmd = None
+                else:
+                    return eventtime + self.error_poll_interval
+            self._send_command(CMD_POS_ERROR)
+            self.pending_error_cmd = CMD_POS_ERROR
+            self.pending_error_since = eventtime
+        except Exception as e:
+            self._register_error_failure(str(e), position_error=True)
+            self.pending_error_cmd = None
+            logging.exception("zdt_emm42 %s: position-error poll failed", self.name)
+        return eventtime + self.error_poll_interval
+
     def _register_no_response(self, cmd):
+        self._register_error_failure(
+            "no response for cmd 0x%02X" % cmd,
+            position_error=(cmd == CMD_POS_ERROR),
+            throttle_message=True)
+
+    def _register_error_failure(self, message, position_error=False,
+                                throttle_message=False):
         self.error_count += 1
         self.last['error_count'] = self.error_count
-        if self.error_count % 50 == 1:
-            self.last_error = "no response for cmd 0x%02X" % cmd
+        if position_error:
+            self.last['online'] = False
+        if not throttle_message or self.error_count % 50 == 1:
+            self.last_error = message
             self.last['last_error'] = self.last_error
 
     def _can_id(self, packet_no=0):
@@ -484,6 +550,45 @@ class ZdtEmm42:
         except Exception:
             logging.exception("zdt_emm42 %s: rx handler failed", self.name)
 
+    def _find_pending_response(self, raw):
+        # There can be one general telemetry request and one position-error
+        # request in flight.  Match by the echoed function code instead of
+        # assuming that the most recently sent request owns every frame.
+        candidates = []
+        if self.pending_error_cmd is not None:
+            candidates.append(self.pending_error_cmd)
+        if self.pending_cmd is not None:
+            candidates.append(self.pending_cmd)
+        for cmd in candidates:
+            data = self._normalize_response(raw, cmd)
+            if len(data) >= 2 and data[0] == self.addr and data[1] in (cmd, 0x00):
+                return cmd, data
+        return None, None
+
+    def _clear_pending(self, cmd):
+        if cmd == CMD_POS_ERROR:
+            self.pending_error_cmd = None
+        elif self.pending_cmd == cmd:
+            self.pending_cmd = None
+
+    def _append_error_sample(self, eventtime):
+        error_deg = self.last.get('error_deg')
+        error_counts = self.last.get('error_counts')
+        if error_deg is None or error_counts is None:
+            return
+        self.error_history.append({
+            'time': eventtime,
+            'error_deg': error_deg,
+            'error_counts': error_counts,
+        })
+        self._prune_error_history(eventtime)
+
+    def _prune_error_history(self, eventtime):
+        cutoff = eventtime - ERROR_HISTORY_SECONDS
+        while self.error_history and self.error_history[0]['time'] < cutoff:
+            self.error_history.popleft()
+        self.last['error_history'] = [dict(sample) for sample in self.error_history]
+
     def _process_frame(self, arb_id, raw, eventtime):
         if (arb_id >> 8) != self.addr:
             self.ext_other_frames += 1
@@ -497,38 +602,47 @@ class ZdtEmm42:
             self.ignored_frames += 1
             self.last['ignored_frames'] = self.ignored_frames
             return
-        cmd = self.pending_cmd
+        cmd, data = self._find_pending_response(raw)
         if cmd is None:
             # Unsolicited extended frame from our address (e.g. a reached command).
             self.ignored_frames += 1
             self.last['ignored_frames'] = self.ignored_frames
             return
-        data = self._normalize_response(raw, cmd)
         if len(data) < 4:
             return
         # Generic error: addr 00 EE 6B
         if data[0] == self.addr and data[1] == 0x00 and data[2] == 0xEE:
             self.last_error = "device returned EE for cmd 0x%02X" % cmd
-            self.error_count += 1
-            self.last['error_count'] = self.error_count
-            self.pending_cmd = None
+            self._register_error_failure(self.last_error, cmd == CMD_POS_ERROR)
+            self._clear_pending(cmd)
             return
         if data[0] == self.addr and data[1] == cmd:
             self.last['last_rx_id'] = "0x%08X" % arb_id
             self.last['last_rx_payload'] = ' '.join('%02X' % b for b in raw)
             if not self._verify_checksum(data):
-                self.last_error = "bad check byte for cmd 0x%02X" % cmd
-                self.error_count += 1
-                self.last['error_count'] = self.error_count
-                self.pending_cmd = None
+                self._register_error_failure(
+                    "bad check byte for cmd 0x%02X" % cmd,
+                    position_error=(cmd == CMD_POS_ERROR))
+                self._clear_pending(cmd)
                 return
-            self._parse_response(cmd, bytearray(data))
+            if not self._record_valid_response(cmd, bytearray(data), eventtime):
+                self._register_error_failure(
+                    "invalid response for cmd 0x%02X" % cmd,
+                    position_error=(cmd == CMD_POS_ERROR))
+            self._clear_pending(cmd)
+
+    def _record_valid_response(self, cmd, data, eventtime):
+        if not self._parse_response(cmd, data):
+            return False
+        if cmd == CMD_POS_ERROR:
             self.last['online'] = True
             self.last['last_update_time'] = eventtime
-            self.last_error = "ok"
-            self.last['last_error'] = self.last_error
-            self.pending_cmd = None
-            self._maybe_write_csv(eventtime)
+            self.last_error_update_time = eventtime
+            self._append_error_sample(eventtime)
+        self.last_error = "ok"
+        self.last['last_error'] = self.last_error
+        self._maybe_write_csv(eventtime)
+        return True
 
     def _record_ignored_frame(self, frame_type, arb_id, payload):
         self.last['request_like_frames'] = self.request_like_frames
@@ -615,39 +729,49 @@ class ZdtEmm42:
         return bytearray([self.addr]) + data
 
     def _parse_response(self, cmd, data):
+        parsed = False
         if cmd == CMD_VOLTAGE and len(data) >= 5:
             self.last['voltage_mv'] = _u16(data, 2)
+            parsed = True
         elif cmd == CMD_CURRENT and len(data) >= 5:
             self.last['current_ma'] = _u16(data, 2)
+            parsed = True
         elif cmd == CMD_ENCODER and len(data) >= 5:
             self.last['encoder_counts'] = _u16(data, 2)
+            parsed = True
         elif cmd == CMD_INPUT_PULSES and len(data) >= 8:
             pulses = _signed_value(data[2], _u32(data, 3))
             self.last['input_pulses'] = pulses
             ppr = float(self.microsteps * self.full_steps_per_rotation)
             self.last['input_pulses_mm'] = pulses * self.rotation_distance / ppr
+            parsed = True
         elif cmd == CMD_TARGET_POS and len(data) >= 8:
             counts = _signed_value(data[2], _u32(data, 3))
             self.last['target_counts'] = counts
             self.last['target_deg'] = self._counts_to_deg(counts)
             self.last['target_mm'] = self._counts_to_mm(counts)
+            parsed = True
         elif cmd == CMD_REALTIME_TARGET and len(data) >= 8:
             counts = _signed_value(data[2], _u32(data, 3))
             self.last['realtime_target_counts'] = counts
             self.last['realtime_target_deg'] = self._counts_to_deg(counts)
             self.last['realtime_target_mm'] = self._counts_to_mm(counts)
+            parsed = True
         elif cmd == CMD_RPM and len(data) >= 6:
             self.last['rpm'] = _signed_value(data[2], _u16(data, 3))
+            parsed = True
         elif cmd == CMD_REAL_POS and len(data) >= 8:
             counts = _signed_value(data[2], _u32(data, 3))
             self.last['actual_counts'] = counts
             self.last['actual_deg'] = self._counts_to_deg(counts)
             self.last['actual_mm'] = self._counts_to_mm(counts)
+            parsed = True
         elif cmd == CMD_POS_ERROR and len(data) >= 8:
             counts = _signed_value(data[2], _u32(data, 3))
             self.last['error_counts'] = counts
             self.last['error_deg'] = self._counts_to_deg(counts)
             self.last['error_mm'] = self._counts_to_mm(counts)
+            parsed = True
         elif cmd == CMD_MOTOR_FLAGS and len(data) >= 4:
             flags = data[2]
             self.last['motor_flags'] = flags
@@ -655,6 +779,7 @@ class ZdtEmm42:
             self.last['reached'] = bool(flags & 0x02)
             self.last['stalled'] = bool(flags & 0x04)
             self.last['stall_protect'] = bool(flags & 0x08)
+            parsed = True
         elif cmd == CMD_HOME_FLAGS and len(data) >= 4:
             flags = data[2]
             self.last['home_flags'] = flags
@@ -662,7 +787,9 @@ class ZdtEmm42:
             self.last['calibration_ready'] = bool(flags & 0x02)
             self.last['homing'] = bool(flags & 0x04)
             self.last['home_failed'] = bool(flags & 0x08)
+            parsed = True
         self.last['csv_logging'] = self.csv_logging
+        return parsed
 
     def _counts_to_deg(self, counts):
         return counts * 360.0 / 65536.0
@@ -727,9 +854,16 @@ class ZdtEmm42:
         self.csv_file.flush()
 
     def get_status(self, eventtime):
+        self._prune_error_history(eventtime)
         status = dict(self.last)
         status['error_count'] = self.error_count
         status['last_error'] = self.last_error
+        status['error_history'] = [dict(sample) for sample in self.error_history]
+        status['error_poll_interval'] = self.error_poll_interval
+        status['online'] = bool(
+            self.enabled and status.get('online') is True and
+            self.last_error_update_time is not None and
+            eventtime - self.last_error_update_time <= self.offline_timeout)
         return status
 
     def cmd_STATUS(self, gcmd):
@@ -773,7 +907,8 @@ class ZdtEmm42:
         data = self._query_sync(cmd, extra, self.query_timeout)
         if data is None:
             raise gcmd.error("No valid response for cmd 0x%02X: %s" % (cmd, self.last_error))
-        self._parse_response(cmd, data)
+        if not self._record_valid_response(cmd, data, self.reactor.monotonic()):
+            raise gcmd.error("Invalid response for cmd 0x%02X" % cmd)
         gcmd.respond_info("0x%02X <= %s" % (cmd, ' '.join('%02X' % b for b in data)))
 
     def cmd_SNIFF(self, gcmd):
@@ -842,9 +977,15 @@ class ZdtEmm42:
         self.enabled = bool(enable)
         if self.timer is None:
             self.timer = self.reactor.register_timer(self._poll_timer)
+        if self.error_timer is None:
+            self.error_timer = self.reactor.register_timer(self._error_poll_timer)
         if not self.enabled:
             self.pending_cmd = None
-        self.reactor.update_timer(self.timer, self.reactor.NOW if self.enabled else self.reactor.NEVER)
+            self.pending_error_cmd = None
+            self.last['online'] = False
+        waketime = self.reactor.NOW if self.enabled else self.reactor.NEVER
+        self.reactor.update_timer(self.timer, waketime)
+        self.reactor.update_timer(self.error_timer, waketime)
         gcmd.respond_info("ZDT Emm42 '%s' polling %s" % (self.name, 'enabled' if self.enabled else 'disabled'))
 
     def _fmt(self, value):
