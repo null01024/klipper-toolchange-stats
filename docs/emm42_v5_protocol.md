@@ -837,7 +837,7 @@ CAN 扩展帧 ID：0x0100       # ID_Addr=1，packet_number=0
 CAN payload：37 6B
 ```
 
-插件将 `0x37` 从普通遥测轮询中拆出，使用 `error_poll_interval` 独立采样，默认值为 `0.10` 秒。`poll_interval` 仍控制其它读取命令；两类请求可以各有一个短暂的异步响应等待，不会把位置误差降低到完整轮询列表的周期。
+插件将 `0x37` 从普通遥测轮询中拆出，使用 `error_poll_interval` 独立采样，默认值为 `0.05` 秒。`poll_interval` 仍控制其它读取命令；两类请求可以各有一个短暂的异步响应等待，不会把位置误差降低到完整轮询列表的周期。
 
 ### 11.2 位置误差状态字段
 
@@ -850,7 +850,7 @@ CAN payload：37 6B
 | `last_update_time` | 最近一次有效误差样本的 Klipper reactor 单调时间。 |
 | `online` | 在 `offline_timeout` 内收到有效 `0x37` 响应且轮询已启用时为 `true`。 |
 | `error_count` | 超时、发送失败、通用错误和校验失败的累计计数。 |
-| `error_history` | 最近 5 秒有效样本列表，每项包含 `time`、`error_deg` 和 `error_counts`。 |
+| `error_history` | 最近 10 秒有效样本列表，每项包含 `time`、`error_deg`、`error_counts` 和 `error_mm`。 |
 
 误差角度必须按协议的符号与幅值规则计算：
 
@@ -864,9 +864,9 @@ error_deg = sign × raw_value × 360 / 65536
 
 ### 11.3 Mainsail Dashboard 面板
 
-配套的 `mainsail-toolchanger` 会自动识别单个 `[zdt_emm42 <name>]` 对象，并在 Dashboard 提供可折叠、可排序且持久化布局的“EMM42 位置误差”面板。面板使用 `error_history` 绘制最近 5 秒滚动曲线，横轴为相对秒数，纵轴为角度 `°`，零线单独标出，同时显示当前值、5 秒最大绝对误差、采样周期和 CAN 在线状态。
+配套的 `mainsail-toolchanger` 会自动识别全部 `[zdt_emm42 <name>]` 对象，并在 Dashboard 提供可折叠、可排序且持久化布局的“EMM42 位置误差”面板。每个实例使用独立标签页，面板可按角度或毫米使用 `error_history` 绘制最近 10 秒滚动曲线，横轴为相对秒数，零线单独标出，同时显示当前值、10 秒最大绝对误差、采样周期、CAN 在线状态以及电气、运动、PID 和诊断信息。
 
-未配置 `zdt_emm42` 时面板显示配置提示；配置存在但没有有效响应时显示离线提示，并且不绘制伪造零值。曲线窗口与 CSV 日志相互独立：曲线始终只看最近 5 秒，而 CSV 仍由 `csv_path`、`ZDT_EMM_LOG ENABLE=1` 和 `ZDT_EMM_LOG ENABLE=0` 控制。
+未配置 `zdt_emm42` 时面板显示配置提示；配置存在但没有有效响应时显示离线提示，并且不绘制伪造零值。曲线窗口与 CSV 日志相互独立：曲线始终只看最近 10 秒，而 CSV 仍由 `csv_path`、`ZDT_EMM_LOG ENABLE=1` 和 `ZDT_EMM_LOG ENABLE=0` 控制。
 
 ## 12. Klipper 在线 PID 自动调参
 
@@ -924,7 +924,7 @@ ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=100 SPEED=200 ACCEL
 
 每类轨迹的全部移动会先加入 Klipper 前瞻队列，并且只在整个轨迹块结束时调用一次等待，使连续拐角不会被逐段强制停住。测试前通过 Klipper 的运动限制接口临时设置速度和加速度，结束后同时恢复最大速度、最大加速度、拐角速度和最小巡航比例。
 
-CoreXY 模式在每个 PID 候选下重复每个“速度档 × 轨迹”工况，默认 `REPEATS=3`，使用中位数降低机械噪声和 CAN 采样相位的影响，然后对所有工况等权平均。调参期间暂停普通遥测轮询，`0x37` 使用独立 20 ms 采样周期和独立内存缓冲；因此测试超过 5 秒时也不会被 Dashboard 历史窗口裁掉。
+CoreXY 模式在每个 PID 候选下重复每个“速度档 × 轨迹”工况，默认 `REPEATS=3`，使用中位数降低机械噪声和 CAN 采样相位的影响，然后对所有工况等权平均。调参期间暂停普通遥测轮询，`0x37` 使用独立 20 ms 采样周期和独立内存缓冲；因此测试超过 10 秒时也不会被 Dashboard 历史窗口裁掉。
 
 每个样本按运动和停止稳定阶段标记，正常方向变化不再作为超调。单次评分为：
 

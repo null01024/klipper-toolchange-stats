@@ -14,7 +14,7 @@
 #   can_filter: ext            # off | ext (default) | addr
 #   checksum_mode: 0x6B        # 0x6B (default) | xor | crc8 (crc8 unverified)
 #   poll_interval: 0.10
-#   error_poll_interval: 0.10  # independent 0x37 position-error sample period
+#   error_poll_interval: 0.05  # independent 0x37 position-error sample period
 #   query_timeout: 0.006
 #   rotation_distance: 40
 #   microsteps: 16             # MUST match the driver's MStep setting (driver default is 16)
@@ -80,7 +80,7 @@ CMD_POS_ERROR = 0x37         # addr 37 sign u32 6B
 CMD_MOTOR_FLAGS = 0x3A       # addr 3A flags 6B
 CMD_HOME_FLAGS = 0x3B        # addr 3B flags 6B
 
-ERROR_HISTORY_SECONDS = 5.0
+ERROR_HISTORY_SECONDS = 10.0
 AUTOTUNE_SAMPLE_INTERVAL = 0.02
 AUTOTUNE_MAX_SAMPLES = 100000
 PID_RESPONSE_LEN = 15        # address + command + KP[4] + KI[4] + KD[4] + check
@@ -188,7 +188,7 @@ class ZdtEmm42:
         self.can_filter = self._parse_can_filter(config)
         self.poll_interval = config.getfloat('poll_interval', 0.10, above=0.0)
         self.error_poll_interval = config.getfloat(
-            'error_poll_interval', 0.10, above=0.0)
+            'error_poll_interval', 0.05, above=0.0)
         self.query_timeout = config.getfloat('query_timeout', 0.006, above=0.0)
         self.offline_timeout = config.getfloat(
             'offline_timeout', max(1.0, self.error_poll_interval * 3.0), above=0.0)
@@ -308,7 +308,7 @@ class ZdtEmm42:
             'can_interface': getattr(self, 'can_interface', ''),
             'addr': getattr(self, 'addr', 0),
             'last_update_time': 0.0,
-            'error_poll_interval': getattr(self, 'error_poll_interval', 0.10),
+            'error_poll_interval': getattr(self, 'error_poll_interval', 0.05),
             'error_history': [],
             'voltage_mv': None,
             'current_ma': None,
@@ -675,6 +675,7 @@ class ZdtEmm42:
             'time': eventtime,
             'error_deg': error_deg,
             'error_counts': error_counts,
+            'error_mm': self.last.get('error_mm'),
         }
         self.error_history.append(sample)
         if getattr(self, 'autotune_capture_active', False):

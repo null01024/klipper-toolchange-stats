@@ -40,7 +40,7 @@ can_payload_includes_addr: False
 can_filter: ext
 checksum_mode: 0x6B
 poll_interval: 0.10
-error_poll_interval: 0.10
+error_poll_interval: 0.05
 query_timeout: 0.006
 offline_timeout: 1.0
 rotation_distance: 40
@@ -67,9 +67,9 @@ error_deg = sign × raw_value × 360 / 65536
 
 符号字节 `0x00` 表示正、`0x01` 表示负；数值字段是 32 位大端“幅值”，不是补码。例如 `sign=0x01`、`raw_value=0x00000008` 得到约 `-0.043945°`。
 
-`get_status()` 还提供 `last_update_time`、`online`、`error_count` 和 `error_history`。`error_history` 只保留最近 5 秒内校验通过的位置误差样本；超时、错误响应和校验失败不会追加零值或其它伪造点。5 秒是曲线滚动显示窗口，不是 CSV 累计日志长度，CSV 是否启用仍由 `csv_path` 或 `ZDT_EMM_LOG` 独立控制。
+`get_status()` 还提供 `last_update_time`、`online`、`error_count` 和 `error_history`。`error_history` 只保留最近 10 秒内校验通过的位置误差样本，每项包含角度、原始计数和毫米误差；超时、错误响应和校验失败不会追加零值或其它伪造点。10 秒是曲线滚动显示窗口，不是 CSV 累计日志长度，CSV 是否启用仍由 `csv_path` 或 `ZDT_EMM_LOG` 独立控制。
 
-安装对应的 `mainsail-toolchanger` 前端并重启 Klipper 后，Dashboard 会出现“EMM42 位置误差”面板。面板显示当前误差、最近 5 秒最大绝对误差、采样状态、CAN 在线状态和带零线的角度曲线；没有 `[zdt_emm42]` 配置或驱动器离线时会显示明确提示。现有 `ZDT_EMM_STATUS`、`ZDT_EMM_QUERY`、`ZDT_EMM_SNIFF`、`ZDT_EMM_LOG` 和 `ZDT_EMM_POLL` 命令继续可用。
+安装对应的 `mainsail-toolchanger` 前端并重启 Klipper 后，Dashboard 会出现“EMM42 位置误差”面板。面板自动发现全部 `[zdt_emm42 <name>]` 实例，通过标签页切换；可用角度或毫米绘制最近 10 秒误差，并显示电气、运动、PID、驱动状态和 CAN 诊断信息。没有配置或驱动器离线时会显示明确提示。现有 `ZDT_EMM_STATUS`、`ZDT_EMM_QUERY`、`ZDT_EMM_SNIFF`、`ZDT_EMM_LOG` 和 `ZDT_EMM_POLL` 命令继续可用。
 
 ### 闭环 PID 自动调参
 
@@ -85,7 +85,7 @@ ZDT_EMM_AUTOTUNE NAME=shadow_a AXIS=X DISTANCE=10 SPEED=20 ACCEL=200 ITERATIONS=
 ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=100 SPEED=200 ACCEL=5000 ITERATIONS=20 REPEATS=3 MAX_ERROR_DEG=6.5 CONFIRM=1
 ```
 
-以上数值也是 CoreXY 模式的默认值；当前位置向正 X、正 Y 各需保留 100 mm 安全空间。`SPEED`、`ACCEL` 应填写切片中实际使用的最高打印值。插件自动使用 40%、70%、100% 三档速度/加速度，并在每档执行 100 mm 长线/对角线、10 mm 连续直角折线和 32 段圆周三类轨迹。每类轨迹整体进入 Klipper 前瞻队列，只在轨迹块结束时等待，因此拐角速度与真实打印更接近。每个“速度档 × 轨迹”工况默认重复三次取中位数，所有工况等权评分。调参使用独立 20 ms 采样缓冲，不受 Dashboard 5 秒历史窗口影响，评分由运动 RMS、P95、峰值和停止后 RMS 组成。
+以上数值也是 CoreXY 模式的默认值；当前位置向正 X、正 Y 各需保留 100 mm 安全空间。`SPEED`、`ACCEL` 应填写切片中实际使用的最高打印值。插件自动使用 40%、70%、100% 三档速度/加速度，并在每档执行 100 mm 长线/对角线、10 mm 连续直角折线和 32 段圆周三类轨迹。每类轨迹整体进入 Klipper 前瞻队列，只在轨迹块结束时等待，因此拐角速度与真实打印更接近。每个“速度档 × 轨迹”工况默认重复三次取中位数，所有工况等权评分。调参使用独立 20 ms 采样缓冲，不受 Dashboard 10 秒历史窗口影响，评分由运动 RMS、P95、峰值和停止后 RMS 组成。
 
 候选 PID 使用 `0x4A STORE=0` 写入并回读，Kp/Kd 默认限制在原始值的 `0.5–2.0` 倍，Ki 默认限制在 `0–max(原始值×10, 原始值+10×KI_STEP)`；也可用 `KP_MIN/KP_MAX`、`KI_MIN/KI_MAX`、`KD_MIN/KD_MAX` 覆盖。候选至少改善 2% 才会接受，搜索结束后还会使用 55%、85% 档和不同轨迹进行独立验证，通过后才以 `STORE=1` 写入电机。这个过程不修改 `printer.cfg`，也不需要重启 Klipper。
 

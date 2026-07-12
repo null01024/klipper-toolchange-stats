@@ -98,13 +98,13 @@ def make_monitor():
     monitor.check_byte = 0x6B
     monitor.checksum_mode = 'fixed'
     monitor.can_payload_includes_addr = False
-    monitor.error_poll_interval = 0.10
+    monitor.error_poll_interval = 0.05
     monitor.query_timeout = 0.006
     monitor.offline_timeout = 1.0
     monitor.rotation_distance = 40.0
     monitor.microsteps = 16
     monitor.full_steps_per_rotation = 200
-    monitor.error_history = deque(maxlen=52)
+    monitor.error_history = deque(maxlen=202)
     monitor.last_error_update_time = None
     monitor.pending_cmd = None
     monitor.pending_error_cmd = None
@@ -401,18 +401,18 @@ class ZdtEmm42Test(unittest.TestCase):
             [tier['profile'] for tier in aggregate['tiers']],
             ['long', 'corner', 'curve'])
 
-    def test_autotune_capture_is_independent_of_ui_five_second_window(self):
+    def test_autotune_capture_is_independent_of_ui_ten_second_window(self):
         monitor = make_monitor()
         monitor.autotune_capture_active = True
         monitor.autotune_capture_phase = 'motion:test'
         monitor.autotune_max_error_deg = 100.0
 
-        for eventtime in range(8):
+        for eventtime in range(13):
             monitor.last['error_deg'] = float(eventtime)
             monitor.last['error_counts'] = eventtime
             monitor._append_error_sample(float(eventtime))
 
-        self.assertEqual(len(monitor.autotune_capture_samples), 8)
+        self.assertEqual(len(monitor.autotune_capture_samples), 13)
         self.assertTrue(all(sample['time'] >= 2.0
                             for sample in monitor.error_history))
         self.assertTrue(all(sample['phase'] == 'motion:test'
@@ -521,7 +521,9 @@ class ZdtEmm42Test(unittest.TestCase):
         self.assertTrue(monitor._verify_checksum(negative))
         self.assertTrue(monitor._record_valid_response(ZDT.CMD_POS_ERROR, negative, 10.0))
         self.assertAlmostEqual(monitor.last['error_deg'], -0.0439453125)
+        self.assertAlmostEqual(monitor.last['error_mm'], -0.0048828125)
         self.assertEqual(monitor.last['error_counts'], -8)
+        self.assertAlmostEqual(monitor.error_history[-1]['error_mm'], -0.0048828125)
 
         self.assertTrue(monitor._record_valid_response(ZDT.CMD_POS_ERROR, positive, 10.1))
         self.assertAlmostEqual(monitor.last['error_deg'], 0.0439453125)
@@ -565,15 +567,15 @@ class ZdtEmm42Test(unittest.TestCase):
         monitor._record_valid_response(ZDT.CMD_POS_ERROR, raw, 10.0)
         self.assertTrue(monitor.get_status(10.5)['online'])
         self.assertFalse(monitor.get_status(11.1)['online'])
-        self.assertEqual(len(monitor.get_status(20.0)['error_history']), 0)
+        self.assertEqual(len(monitor.get_status(20.001)['error_history']), 0)
 
         monitor._register_no_response(ZDT.CMD_POS_ERROR)
         self.assertFalse(monitor.get_status(10.5)['online'])
 
-    def test_history_is_limited_to_five_seconds(self):
+    def test_history_is_limited_to_ten_seconds(self):
         monitor = make_monitor()
 
-        for eventtime in range(8):
+        for eventtime in range(13):
             raw = bytearray([1, ZDT.CMD_POS_ERROR, 0, 0, 0, 0, eventtime, 0x6B])
             self.assertTrue(monitor._record_valid_response(ZDT.CMD_POS_ERROR, raw, float(eventtime)))
 
@@ -581,7 +583,7 @@ class ZdtEmm42Test(unittest.TestCase):
         self.assertLessEqual(
             max(sample['time'] for sample in monitor.error_history) -
             min(sample['time'] for sample in monitor.error_history),
-            5.0,
+            10.0,
         )
         self.assertEqual(len(monitor.last['error_history']), len(monitor.error_history))
 
