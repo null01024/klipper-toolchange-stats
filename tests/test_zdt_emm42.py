@@ -40,6 +40,19 @@ class ReplySocket(CaptureSocket):
         return 0
 
 
+class FakeReactor:
+    def __init__(self):
+        self.now = 10.0
+        self.pauses = []
+
+    def monotonic(self):
+        return self.now
+
+    def pause(self, waketime):
+        self.pauses.append(waketime)
+        self.now = max(self.now, waketime)
+
+
 def make_monitor():
     monitor = ZDT.ZdtEmm42.__new__(ZDT.ZdtEmm42)
     monitor.name = 'test'
@@ -156,6 +169,18 @@ class ZdtEmm42Test(unittest.TestCase):
         self.assertEqual(len(monitor.sock.frames), 1)
         request = struct.unpack(ZDT.CAN_FRAME_FMT, monitor.sock.frames[0])
         self.assertEqual(request[2][:2], bytes([ZDT.CMD_READ_PID, 0x6B]))
+
+    def test_pid_write_waits_and_retries_stale_readback(self):
+        monitor = make_monitor()
+        monitor.reactor = FakeReactor()
+        monitor.pid_write_settle_time = 0.05
+        monitor._query_sync = lambda *args, **kwargs: bytearray(
+            [0x01, ZDT.CMD_WRITE_PID, 0x02, 0x6B])
+        readbacks = iter([(1, 2, 3), (1, 2, 3), (4, 5, 6)])
+        monitor._read_pid = lambda timeout=None: next(readbacks)
+
+        self.assertTrue(monitor._write_pid((4, 5, 6), store=0, verify=True))
+        self.assertEqual(len(monitor.reactor.pauses), 3)
 
     def test_autotune_score_and_candidate_search(self):
         monitor = make_monitor()

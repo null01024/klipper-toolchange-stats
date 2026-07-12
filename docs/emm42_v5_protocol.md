@@ -908,6 +908,6 @@ can_payload_includes_addr: False
 - 进入误差阈值的稳定时间；
 - 过零次数、CAN 错误、离线和电机堵转会造成拒绝或惩罚。
 
-默认步长可以在 `[zdt_emm42]` 中设置：`autotune_kp_step`、`autotune_ki_step`、`autotune_kd_step`；单次命令也可以用 `KP_STEP`、`KI_STEP`、`KD_STEP` 覆盖。`autotune_min_samples` 控制每轮最少有效误差样本数。
+默认步长可以在 `[zdt_emm42]` 中设置：`autotune_kp_step`、`autotune_ki_step`、`autotune_kd_step`；单次命令也可以用 `KP_STEP`、`KI_STEP`、`KD_STEP` 覆盖。`autotune_min_samples` 控制每轮最少有效误差样本数，`pid_write_settle_time` 控制 `0x4A` 响应后等待驱动器内部参数生效的时间。每次回读最多重试三次，避免驱动器确认写入但尚未立即反映到 `0x21` 读取结果时中断搜索。
 
 搜索结束后，评分最佳值使用 `0x4A STORE=1` 直接写入驱动器内部存储，并回读确认。该写入不修改 `printer.cfg`，不要求重启 Klipper；如果运动、CAN、回读或最终持久化失败，插件会尽力把原始 PID 写回运行时，并输出失败原因。

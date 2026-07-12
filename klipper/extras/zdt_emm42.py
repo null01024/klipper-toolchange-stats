@@ -24,6 +24,7 @@
 #   autotune_kp_step: 5000
 #   autotune_ki_step: 20
 #   autotune_kd_step: 5000
+#   pid_write_settle_time: 0.05
 #
 # G-code:
 #   ZDT_EMM_STATUS NAME=shadow_a
@@ -205,6 +206,8 @@ class ZdtEmm42:
         self.autotune_pid_max = config.getint(
             'autotune_pid_max', PID_MAX_VALUE, minval=PID_MIN_VALUE,
             maxval=PID_MAX_VALUE)
+        self.pid_write_settle_time = config.getfloat(
+            'pid_write_settle_time', 0.05, minval=0.0, maxval=5.0)
         if self.autotune_pid_min > self.autotune_pid_max:
             raise config.error('zdt_emm42: autotune_pid_min must not exceed '
                                'autotune_pid_max')
@@ -980,13 +983,26 @@ class ZdtEmm42:
                 CMD_WRITE_PID, data, self.reactor.monotonic()):
             self.last_error = 'invalid position PID write response'
             return False
+        settle_time = getattr(self, 'pid_write_settle_time', 0.0)
+        if settle_time > 0.0:
+            # The driver can acknowledge 0x4A before the new runtime values are
+            # visible to a subsequent 0x21 read.  Let that update complete before
+            # checking the value or starting the next motion.
+            self.reactor.pause(self.reactor.monotonic() + settle_time)
         if verify:
-            readback = self._read_pid(timeout)
-            if readback != tuple(int(value) for value in pid):
-                self.last_error = (
-                    'position PID readback mismatch: expected %s got %s' %
-                    (self._format_pid(pid), self._format_pid(readback)))
-                return False
+            expected = tuple(int(value) for value in pid)
+            readback_retries = 3
+            readback = None
+            for attempt in range(readback_retries):
+                readback = self._read_pid(timeout)
+                if readback == expected:
+                    return True
+                if attempt + 1 < readback_retries and settle_time > 0.0:
+                    self.reactor.pause(self.reactor.monotonic() + settle_time)
+            self.last_error = (
+                'position PID readback mismatch: expected %s got %s' %
+                (self._format_pid(pid), self._format_pid(readback)))
+            return False
         return True
 
     def _format_pid(self, pid):
@@ -1135,11 +1151,12 @@ class ZdtEmm42:
         candidate[parameter] = value
         return tuple(candidate), direction
 
-    def _autotune_info(self, gcmd, iteration, pid, metrics, accepted):
+    def _autotune_info(self, gcmd, iteration, pid, metrics, accepted,
+                       reason=None):
         if metrics is None:
             gcmd.respond_info(
                 'ZDT Emm42 autotune iteration %d: %s invalid (%s)' %
-                (iteration, self._format_pid(pid), self.last_error))
+                (iteration, self._format_pid(pid), reason or self.last_error))
             return
         gcmd.respond_info(
             'ZDT Emm42 autotune iteration %d: %s score=%.6f rms=%.6f '
@@ -1215,7 +1232,8 @@ class ZdtEmm42:
                     steps[parameter] = max(1, steps[parameter] // 2)
                     directions[parameter] *= -1
                     self._autotune_info(
-                        gcmd, iteration, current, None, False)
+                        gcmd, iteration, current, None, False,
+                        'search bound reached; step reduced')
                     continue
                 if not self._write_pid(candidate, store=0, verify=True):
                     raise gcmd.error(
@@ -1226,17 +1244,21 @@ class ZdtEmm42:
                 samples = self._run_autotune_motion(
                     toolhead, axis_index, distance, speed, settle_time,
                     sample_start)
+                failure_reason = None
                 if self.error_count != before_errors or not self.get_status(
                         self.reactor.monotonic()).get('online'):
                     metrics = None
                     self.last_error = 'CAN error or offline during motion'
+                    failure_reason = self.last_error
                 elif self.last.get('stalled'):
                     metrics = None
                     self.last_error = 'motor reported stall during motion'
+                    failure_reason = self.last_error
                 else:
                     metrics = self._score_error_samples(samples)
                     if metrics is None:
                         self.last_error = 'too few valid error samples'
+                        failure_reason = self.last_error
                 accepted = metrics is not None and metrics['score'] < best['score']
                 if accepted:
                     current = candidate
@@ -1252,7 +1274,9 @@ class ZdtEmm42:
                     if failed[parameter] >= 2:
                         steps[parameter] = max(1, steps[parameter] // 2)
                         failed[parameter] = 0
-                self._autotune_info(gcmd, iteration, candidate, metrics, accepted)
+                self._autotune_info(
+                    gcmd, iteration, candidate, metrics, accepted,
+                    failure_reason)
 
             if not self._write_pid(current, store=1, verify=True):
                 self._write_pid(original, store=1, verify=False)

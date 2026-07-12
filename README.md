@@ -79,7 +79,7 @@ error_deg = sign × raw_value × 360 / 65536
 ZDT_EMM_AUTOTUNE NAME=shadow_a AXIS=X DISTANCE=10 SPEED=20 ACCEL=200 ITERATIONS=20 CONFIRM=1
 ```
 
-命令每轮执行一次正反往返运动，按本轮新采集的误差 RMS、峰值、超调和稳定时间评分；候选 PID 使用 `0x4A` 的 `STORE=0` 立即写入并回读，搜索结束后最佳值使用 `STORE=1` 写入 EMM42 内部存储。这个过程不修改 `printer.cfg`，也不需要重启 Klipper。默认步长可通过 `[zdt_emm42]` 的 `autotune_kp_step`、`autotune_ki_step` 和 `autotune_kd_step` 调整，运行时也可传 `KP_STEP`、`KI_STEP`、`KD_STEP`。
+命令每轮执行一次正反往返运动，按本轮新采集的误差 RMS、峰值、超调和稳定时间评分；候选 PID 使用 `0x4A` 的 `STORE=0` 写入，等待驱动器参数生效并回读，搜索结束后最佳值使用 `STORE=1` 写入 EMM42 内部存储。这个过程不修改 `printer.cfg`，也不需要重启 Klipper。默认步长可通过 `[zdt_emm42]` 的 `autotune_kp_step`、`autotune_ki_step` 和 `autotune_kd_step` 调整，运行时也可传 `KP_STEP`、`KI_STEP`、`KD_STEP`；`pid_write_settle_time` 可调整 CAN 写入后的等待时间。
 
 命令必须使用 CAN 正确的地址承载方式：
 
