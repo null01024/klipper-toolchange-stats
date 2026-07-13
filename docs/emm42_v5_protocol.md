@@ -839,6 +839,8 @@ CAN payload：37 6B
 
 插件将 `0x37` 从普通遥测轮询中拆出，使用 `error_poll_interval` 独立采样，默认值为 `0.05` 秒。`poll_interval` 仍控制其它读取命令；两类请求可以各有一个短暂的异步响应等待，不会把位置误差降低到完整轮询列表的周期。
 
+位置环 PID 使用 `0x21` 多帧回复，不能按普通短帧处理。插件在 Klipper 连接后自动读取一次，并按 `pid_poll_interval`（默认 `30.0` 秒）使用独立异步状态机刷新；多帧按 CAN 扩展 ID 低字节包号重组并统一校验。读取失败会保留最后一次有效 PID，不会把设备的位置误差在线状态改为离线。
+
 ### 11.2 位置误差状态字段
 
 `zdt_emm42` 对象的状态至少包含以下曲线所需字段：
@@ -851,6 +853,10 @@ CAN payload：37 6B
 | `online` | 在 `offline_timeout` 内收到有效 `0x37` 响应且轮询已启用时为 `true`。 |
 | `error_count` | 超时、发送失败、通用错误和校验失败的累计计数。 |
 | `error_history` | 最近 10 秒有效样本列表，每项包含 `time`、`error_deg`、`error_counts` 和 `error_mm`。 |
+| `pid_kp` / `pid_ki` / `pid_kd` | 最近一次有效 `0x21` 回复的位置环 PID。 |
+| `pid_poll_interval` | PID 自动刷新周期，默认 30 秒。 |
+| `pid_last_update_time` | 最近一次有效 PID 回复的 Klipper 单调时钟时间。 |
+| `pid_error` | 最近一次 PID 刷新错误；成功或尚未首次读取时为空。 |
 
 误差角度必须按协议的符号与幅值规则计算：
 

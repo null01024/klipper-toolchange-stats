@@ -108,6 +108,12 @@ def make_monitor():
     monitor.last_error_update_time = None
     monitor.pending_cmd = None
     monitor.pending_error_cmd = None
+    monitor.pid_poll_interval = 30.0
+    monitor.pid_timer = None
+    monitor.pending_pid = False
+    monitor.pending_pid_since = 0.0
+    monitor.pending_pid_tail = bytearray()
+    monitor.pending_pid_packet = 0
     monitor.query_index = 0
     monitor.error_count = 0
     monitor.last_error = 'not started'
@@ -118,6 +124,7 @@ def make_monitor():
     monitor.autotune_pid_min = 0
     monitor.autotune_pid_max = 0xFFFFFFFF
     monitor.autotune_capture_active = False
+    monitor.autotune_active = False
     monitor.autotune_capture_phase = None
     monitor.autotune_capture_samples = []
     monitor.autotune_max_error_deg = None
@@ -213,6 +220,77 @@ class ZdtEmm42Test(unittest.TestCase):
         self.assertEqual(len(monitor.sock.frames), 1)
         request = struct.unpack(ZDT.CAN_FRAME_FMT, monitor.sock.frames[0])
         self.assertEqual(request[2][:2], bytes([ZDT.CMD_READ_PID, 0x6B]))
+
+    def test_async_pid_poll_reassembles_long_response(self):
+        monitor = make_monitor()
+        monitor.reactor = FakeReactor()
+        monitor.pid_timer = object()
+        monitor.pending_pid = True
+        normalized = bytes([
+            0x01, ZDT.CMD_READ_PID,
+            0x00, 0x00, 0xF2, 0x30,
+            0x00, 0x00, 0x00, 0x64,
+            0x00, 0x00, 0xF2, 0x30,
+            0x6B,
+        ])
+        tail = normalized[2:]
+
+        monitor._process_frame(
+            0x0100, bytes([ZDT.CMD_READ_PID]) + tail[:7], 10.0)
+        monitor._process_frame(
+            0x0101, bytes([ZDT.CMD_READ_PID]) + tail[7:], 10.01)
+
+        self.assertFalse(monitor.pending_pid)
+        self.assertEqual(monitor.last['pid_kp'], 62000)
+        self.assertEqual(monitor.last['pid_ki'], 100)
+        self.assertEqual(monitor.last['pid_kd'], 62000)
+        self.assertEqual(monitor.last['pid_last_update_time'], 10.01)
+        self.assertEqual(monitor.last['pid_error'], '')
+
+    def test_async_pid_error_keeps_last_valid_values(self):
+        monitor = make_monitor()
+        monitor.last['pid_kp'] = 62000
+        monitor.last['pid_ki'] = 100
+        monitor.last['pid_kd'] = 62000
+        monitor.pending_pid = True
+        monitor.pending_pid_packet = 1
+
+        monitor._process_frame(
+            0x0102, bytes([ZDT.CMD_READ_PID, 0x00]), 10.0)
+
+        self.assertFalse(monitor.pending_pid)
+        self.assertIn('out-of-order', monitor.last['pid_error'])
+        self.assertEqual(
+            (monitor.last['pid_kp'], monitor.last['pid_ki'],
+             monitor.last['pid_kd']),
+            (62000, 100, 62000))
+        self.assertEqual(monitor.error_count, 1)
+
+    def test_pid_refresh_failure_does_not_mark_position_error_offline(self):
+        monitor = make_monitor()
+        monitor.enabled = True
+        monitor.last['online'] = True
+        monitor.last_error_update_time = 10.0
+
+        monitor._fail_pid_request('timeout', 10.1)
+
+        self.assertTrue(monitor.get_status(10.5)['online'])
+        self.assertEqual(monitor.last['pid_error'], 'timeout')
+
+    def test_pid_timer_sends_read_request_without_blocking(self):
+        monitor = make_monitor()
+        monitor.reactor = FakeReactor()
+        monitor.enabled = True
+
+        waketime = monitor._pid_poll_timer(10.0)
+
+        can_id, dlc, payload = struct.unpack(
+            ZDT.CAN_FRAME_FMT, monitor.sock.frames[-1])
+        self.assertEqual(can_id & ZDT.CAN_EFF_MASK, 0x0100)
+        self.assertEqual(dlc, 2)
+        self.assertEqual(payload[:2], bytes([ZDT.CMD_READ_PID, 0x6B]))
+        self.assertTrue(monitor.pending_pid)
+        self.assertAlmostEqual(waketime, 10.0 + monitor.query_timeout)
 
     def test_pid_write_waits_and_retries_stale_readback(self):
         monitor = make_monitor()

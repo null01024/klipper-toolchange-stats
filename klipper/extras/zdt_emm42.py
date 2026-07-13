@@ -189,6 +189,8 @@ class ZdtEmm42:
         self.poll_interval = config.getfloat('poll_interval', 0.10, above=0.0)
         self.error_poll_interval = config.getfloat(
             'error_poll_interval', 0.05, above=0.0)
+        self.pid_poll_interval = config.getfloat(
+            'pid_poll_interval', 30.0, above=0.0)
         self.query_timeout = config.getfloat('query_timeout', 0.006, above=0.0)
         self.offline_timeout = config.getfloat(
             'offline_timeout', max(1.0, self.error_poll_interval * 3.0), above=0.0)
@@ -230,6 +232,11 @@ class ZdtEmm42:
         self.pending_since = 0.0
         self.pending_error_cmd = None
         self.pending_error_since = 0.0
+        self.pid_timer = None
+        self.pending_pid = False
+        self.pending_pid_since = 0.0
+        self.pending_pid_tail = bytearray()
+        self.pending_pid_packet = 0
         self.error_history = deque(
             maxlen=max(2, int(math.ceil(ERROR_HISTORY_SECONDS /
                                         self.error_poll_interval)) + 2))
@@ -332,6 +339,9 @@ class ZdtEmm42:
             'pid_ki': None,
             'pid_kd': None,
             'pid_write_status': None,
+            'pid_poll_interval': getattr(self, 'pid_poll_interval', 30.0),
+            'pid_last_update_time': 0.0,
+            'pid_error': '',
             'motor_flags': None,
             'enabled': None,
             'reached': None,
@@ -367,9 +377,15 @@ class ZdtEmm42:
                 self.timer = self.reactor.register_timer(self._poll_timer)
             if self.error_timer is None:
                 self.error_timer = self.reactor.register_timer(self._error_poll_timer)
+            if self.pid_timer is None:
+                self.pid_timer = self.reactor.register_timer(self._pid_poll_timer)
             waketime = self.reactor.NOW if self.enabled else self.reactor.NEVER
             self.reactor.update_timer(self.timer, waketime)
             self.reactor.update_timer(self.error_timer, waketime)
+            self.reactor.update_timer(
+                self.pid_timer,
+                self.reactor.monotonic() + 0.25
+                if self.enabled else self.reactor.NEVER)
             self.last_error = "ok"
         except Exception as e:
             self.enabled = False
@@ -380,10 +396,13 @@ class ZdtEmm42:
         self.enabled = False
         self.pending_cmd = None
         self.pending_error_cmd = None
+        self._cancel_pid_request()
         if self.timer is not None:
             self.reactor.update_timer(self.timer, self.reactor.NEVER)
         if self.error_timer is not None:
             self.reactor.update_timer(self.error_timer, self.reactor.NEVER)
+        if self.pid_timer is not None:
+            self.reactor.update_timer(self.pid_timer, self.reactor.NEVER)
         self._close_csv()
         self._unregister_fd()
         if self.sock is not None:
@@ -478,6 +497,88 @@ class ZdtEmm42:
             self.pending_error_cmd = None
             logging.exception("zdt_emm42 %s: position-error poll failed", self.name)
         return eventtime + self.error_poll_interval
+
+    def _pid_poll_timer(self, eventtime):
+        if not self.enabled:
+            return self.reactor.NEVER
+        if self.pending_pid:
+            if eventtime - self.pending_pid_since < self.query_timeout:
+                return self.pending_pid_since + self.query_timeout
+            self._fail_pid_request(
+                'timeout waiting for PID response', eventtime)
+            return eventtime + self.pid_poll_interval
+        if (self.autotune_active or self.pending_cmd is not None or
+                self.pending_error_cmd is not None):
+            return eventtime + 0.25
+        try:
+            self.pending_pid = True
+            self.pending_pid_since = eventtime
+            self.pending_pid_tail = bytearray()
+            self.pending_pid_packet = 0
+            self._send_command(CMD_READ_PID)
+        except Exception as exc:
+            self._fail_pid_request(str(exc), eventtime)
+            logging.exception('zdt_emm42 %s: PID poll failed', self.name)
+            return eventtime + self.pid_poll_interval
+        return eventtime + self.query_timeout
+
+    def _cancel_pid_request(self):
+        self.pending_pid = False
+        self.pending_pid_tail = bytearray()
+        self.pending_pid_packet = 0
+
+    def _fail_pid_request(self, message, eventtime=None):
+        self._cancel_pid_request()
+        self.error_count += 1
+        self.last['error_count'] = self.error_count
+        self.last['pid_error'] = message
+        if eventtime is not None and self.pid_timer is not None:
+            self.reactor.update_timer(
+                self.pid_timer, eventtime + self.pid_poll_interval)
+
+    def _process_pid_frame(self, arb_id, raw, eventtime):
+        if not self.pending_pid:
+            return False
+        data = self._normalize_long_packet(raw, CMD_READ_PID)
+        if len(data) >= 3 and data[0] == 0x00 and data[1] == 0xEE:
+            self._fail_pid_request(
+                'device returned EE for PID read', eventtime)
+            return True
+        if not data or data[0] != CMD_READ_PID:
+            return False
+        packet_no = arb_id & 0xFF
+        if packet_no != self.pending_pid_packet:
+            self._fail_pid_request(
+                'out-of-order PID packet: expected %d got %d' %
+                (self.pending_pid_packet, packet_no), eventtime)
+            return True
+        self.pending_pid_tail.extend(data[1:])
+        self.pending_pid_packet += 1
+        expected_tail_len = PID_RESPONSE_LEN - 2
+        if len(self.pending_pid_tail) < expected_tail_len:
+            return True
+        if len(self.pending_pid_tail) != expected_tail_len:
+            self._fail_pid_request('invalid PID response length', eventtime)
+            return True
+        normalized = bytearray(
+            [self.addr, CMD_READ_PID]) + self.pending_pid_tail
+        if not self._verify_checksum(normalized):
+            self._fail_pid_request(
+                'bad check byte for PID response', eventtime)
+            return True
+        self._cancel_pid_request()
+        self.last['last_rx_id'] = '0x%08X' % arb_id
+        self.last['last_rx_payload'] = ' '.join('%02X' % b for b in raw)
+        if not self._record_valid_response(
+                CMD_READ_PID, normalized, eventtime):
+            self._fail_pid_request('invalid PID response', eventtime)
+            return True
+        self.last['pid_last_update_time'] = eventtime
+        self.last['pid_error'] = ''
+        if self.pid_timer is not None:
+            self.reactor.update_timer(
+                self.pid_timer, eventtime + self.pid_poll_interval)
+        return True
 
     def _register_no_response(self, cmd):
         self._register_error_failure(
@@ -720,6 +821,11 @@ class ZdtEmm42:
             self.ignored_frames += 1
             self.last['ignored_frames'] = self.ignored_frames
             return
+        # PID replies span multiple CAN frames.  Route them before the generic
+        # request-like filter because the final "21 6B" packet is identical to
+        # the short PID read request payload.
+        if self._process_pid_frame(arb_id, raw, eventtime):
+            return
         if self._is_request_like_payload(raw):
             self.request_like_frames += 1
             self._record_ignored_frame('request-like', arb_id, raw)
@@ -792,6 +898,7 @@ class ZdtEmm42:
         # periodic poll. The periodic path is fully asynchronous (_handle_rx).
         if timeout is None:
             timeout = self.query_timeout
+        self._cancel_pid_request()
         if self.sock is None:
             self._open_socket()
         # Discard any stale frames still queued before we send.
@@ -850,6 +957,7 @@ class ZdtEmm42:
             raise ValueError('response_len is required for a long response')
         if timeout is None:
             timeout = self.query_timeout
+        self._cancel_pid_request()
         if self.sock is None:
             self._open_socket()
         while self._read_one_frame() is not None:
@@ -1061,14 +1169,21 @@ class ZdtEmm42:
             self.timer = self.reactor.register_timer(self._poll_timer)
         if self.error_timer is None:
             self.error_timer = self.reactor.register_timer(self._error_poll_timer)
+        if self.pid_timer is None:
+            self.pid_timer = self.reactor.register_timer(self._pid_poll_timer)
         self.enabled = bool(enabled)
         if not self.enabled:
             self.pending_cmd = None
             self.pending_error_cmd = None
+            self._cancel_pid_request()
             self.last['online'] = False
         waketime = self.reactor.NOW if self.enabled else self.reactor.NEVER
         self.reactor.update_timer(self.timer, waketime)
         self.reactor.update_timer(self.error_timer, waketime)
+        self.reactor.update_timer(
+            self.pid_timer,
+            self.reactor.monotonic() + 0.25
+            if self.enabled else self.reactor.NEVER)
 
     def _check_autotune_preconditions(self, gcmd, axis):
         if self.can_payload_includes_addr:
@@ -2071,6 +2186,9 @@ class ZdtEmm42:
             "pid: Kp=%s Ki=%s Kd=%s write_status=%s" % (
                 l.get('pid_kp'), l.get('pid_ki'), l.get('pid_kd'),
                 l.get('pid_write_status')),
+            "pid monitor: interval=%ss last_update=%s error=%s" % (
+                self.pid_poll_interval, l.get('pid_last_update_time'),
+                l.get('pid_error')),
             "flags: enabled=%s reached=%s stalled=%s stall_protect=%s" % (
                 l.get('enabled'), l.get('reached'), l.get('stalled'), l.get('stall_protect')),
             "home: encoder_ready=%s calibration_ready=%s homing=%s home_failed=%s" % (

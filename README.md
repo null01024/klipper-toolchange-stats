@@ -41,6 +41,7 @@ can_filter: ext
 checksum_mode: 0x6B
 poll_interval: 0.10
 error_poll_interval: 0.05
+pid_poll_interval: 30.0
 query_timeout: 0.006
 offline_timeout: 1.0
 rotation_distance: 40
@@ -70,6 +71,8 @@ error_deg = sign × raw_value × 360 / 65536
 `get_status()` 还提供 `last_update_time`、`online`、`error_count` 和 `error_history`。`error_history` 只保留最近 10 秒内校验通过的位置误差样本，每项包含角度、原始计数和毫米误差；超时、错误响应和校验失败不会追加零值或其它伪造点。10 秒是曲线滚动显示窗口，不是 CSV 累计日志长度，CSV 是否启用仍由 `csv_path` 或 `ZDT_EMM_LOG` 独立控制。
 
 安装对应的 `mainsail-toolchanger` 前端并重启 Klipper 后，Dashboard 会出现“EMM42 位置误差”面板。面板自动发现全部 `[zdt_emm42 <name>]` 实例，通过标签页切换；可用角度或毫米绘制最近 10 秒误差，并显示电气、运动、PID、驱动状态和 CAN 诊断信息。没有配置或驱动器离线时会显示明确提示。现有 `ZDT_EMM_STATUS`、`ZDT_EMM_QUERY`、`ZDT_EMM_SNIFF`、`ZDT_EMM_LOG` 和 `ZDT_EMM_POLL` 命令继续可用。
+
+PID 参数通过 `0x21` 多帧回复独立读取：Klipper 连接后自动读取一次，此后默认每 30 秒异步刷新。可用 `pid_poll_interval` 调整周期。读取失败时保留上次有效 Kp/Ki/Kd，并通过 `pid_error` 暴露失败原因，不影响位置误差的 CAN 在线判定。
 
 ### 闭环 PID 自动调参
 
