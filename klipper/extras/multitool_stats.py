@@ -14,11 +14,14 @@
 # 持久化字段命名沿用旧版 (tc_total_*)，迁移用户改完 section 名
 # (multitoolr_stats → multitool_stats) 后历史数据自动延续。
 
+import json
+from datetime import date, timedelta
 from time import monotonic
 
 
 # 换热端阶段定义（按发生顺序）
 TOOLCHANGE_STAGES = ('release', 'pickup', 'heat_wait')
+DAILY_HISTORY_DAYS = 7
 
 # print_stats.state 视为"打印中"的状态值
 PRINTING_STATES = ('printing',)
@@ -42,12 +45,14 @@ class MultitoolStats:
             'release':   self.persist_prefix + 'release',
             'pickup':    self.persist_prefix + 'pickup',
             'heat_wait': self.persist_prefix + 'heat_wait',
+            'daily':     self.persist_prefix + 'daily',
         }
 
         # 三段式数据
         self._reset_current()
         self._print = self._empty_stats()
         self._total = self._empty_stats()
+        self._daily = {}
 
         self.printer.register_event_handler('klippy:ready', self._on_ready)
 
@@ -70,6 +75,53 @@ class MultitoolStats:
             'stages': {s: 0.0 for s in TOOLCHANGE_STAGES},
         }
 
+    def _today(self):
+        return date.today()
+
+    def _daily_dates(self):
+        today = self._today()
+        return [today - timedelta(days=offset)
+                for offset in range(DAILY_HISTORY_DAYS - 1, -1, -1)]
+
+    def _daily_window(self):
+        return [
+            {
+                'date': day.isoformat(),
+                'count': self._daily.get(day.isoformat(), 0),
+            }
+            for day in self._daily_dates()
+        ]
+
+    def _load_daily(self, value):
+        self._daily = {}
+        if not isinstance(value, (list, tuple)):
+            return
+
+        valid_dates = {day.isoformat() for day in self._daily_dates()}
+        for entry in value:
+            if not isinstance(entry, dict):
+                continue
+            day = entry.get('date')
+            count = entry.get('count')
+            if day not in valid_dates or isinstance(count, bool):
+                continue
+            try:
+                parsed_count = int(count)
+            except (TypeError, ValueError):
+                continue
+            if parsed_count < 0 or parsed_count != count:
+                continue
+            self._daily[day] = parsed_count
+
+    def _increment_daily(self):
+        valid_dates = {day.isoformat() for day in self._daily_dates()}
+        self._daily = {
+            day: count for day, count in self._daily.items()
+            if day in valid_dates
+        }
+        today = self._today().isoformat()
+        self._daily[today] = self._daily.get(today, 0) + 1
+
     # ------------------------------------------------------------------
     # 启动加载 / 持久化
     # ------------------------------------------------------------------
@@ -87,6 +139,7 @@ class MultitoolStats:
                         v.get(self._persist_keys[s], 0.0))
             except (TypeError, ValueError):
                 self._total = self._empty_stats()
+            self._load_daily(v.get(self._persist_keys['daily'], []))
 
         if self._total['count'] > 0 and self.boot_banner_delay_s > 0.:
             reactor = self.printer.get_reactor()
@@ -161,6 +214,10 @@ class MultitoolStats:
         for s in TOOLCHANGE_STAGES:
             cmds.append("SAVE_VARIABLE VARIABLE=%s VALUE=%.6f"
                         % (keys[s], self._total['stages'][s]))
+        daily_value = json.dumps(
+            self._daily_window(), separators=(',', ':'))
+        cmds.append("SAVE_VARIABLE VARIABLE=%s VALUE=%s"
+                    % (keys['daily'], daily_value))
         for c in cmds:
             self.gcode.run_script_from_command(c)
 
@@ -199,6 +256,7 @@ class MultitoolStats:
                 'elapsed': self._total['elapsed'],
                 'stages': self._total['stages'].copy(),
             },
+            'tc_daily': self._daily_window(),
         }
 
     # ------------------------------------------------------------------
@@ -254,6 +312,8 @@ class MultitoolStats:
         self._total['elapsed'] += elapsed
         for s in TOOLCHANGE_STAGES:
             self._total['stages'][s] += stages[s]
+
+        self._increment_daily()
 
         # 每次成功换头立即落盘：保证异常退出也不丢历史累计，代价是写盘较频繁。
         self._save_total()
