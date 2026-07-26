@@ -6,6 +6,10 @@
 #   GH_PROXY=https://v6.gh-proxy.org/ wget -O - https://v6.gh-proxy.org/https://raw.githubusercontent.com/null01024/klipper-toolchange-stats/main/install.sh | GH_PROXY=https://v6.gh-proxy.org/ bash
 # 用法 (本地):
 #   bash ~/klipper-toolchange-stats/install.sh
+# 用法 (非交互，仅安装插件及可选网页):
+#   INSTALL_MODE=plugins bash ~/klipper-toolchange-stats/install.sh
+# 用法 (非交互，自动完成换热端配置):
+#   INSTALL_MODE=configure bash ~/klipper-toolchange-stats/install.sh
 
 KLIPPER_PATH="${KLIPPER_PATH:-${HOME}/klipper}"
 MOONRAKER_PATH="${MOONRAKER_PATH:-${HOME}/moonraker}"
@@ -13,6 +17,7 @@ INSTALL_PATH="${INSTALL_PATH:-${HOME}/klipper-toolchange-stats}"
 CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
 REPO_URL="${REPO_URL:-https://github.com/null01024/klipper-toolchange-stats.git}"
 GH_PROXY="${GH_PROXY:-}"
+INSTALL_MODE="${INSTALL_MODE:-}"
 FRESH_INSTALL=0
 TOOLCHANGE_SCHEME="custom"
 TOOL_CALIBRATION_SCHEME="none"
@@ -70,16 +75,62 @@ function read_answer {
     printf -v "${__var}" "%s" "${__answer}"
 }
 
-function ask_yes_no_default_no {
-    local prompt="${1}"
+function read_required_answer {
+    local __var="${1}"
+    local __answer=""
+    if [ -r /dev/tty ]; then
+        if { read -r __answer < /dev/tty; } 2>/dev/null; then
+            printf -v "${__var}" "%s" "${__answer}"
+            return 0
+        fi
+    fi
+    if read -r __answer; then
+        printf -v "${__var}" "%s" "${__answer}"
+        return 0
+    fi
+    return 1
+}
+
+function ask_install_mode {
     local answer
+
+    case "${INSTALL_MODE}" in
+        plugins)
+            echo "[MODE] 仅安装/更新插件及可选网页。"
+            echo
+            return
+            ;;
+        configure)
+            echo "[MODE] 自动完成换热端配置。"
+            echo
+            return
+            ;;
+        "") ;;
+        *) die "未知 INSTALL_MODE: ${INSTALL_MODE}。可用值为 plugins 或 configure。" ;;
+    esac
+
     while true; do
-        printf "%s" "${prompt}"
-        read_answer answer
+        cat <<EOF
+请选择安装模式：
+  1. 仅安装/更新插件及可选网页（不修改 Klipper/Moonraker 配置）
+  2. 自动完成换热端配置
+EOF
+        printf "请输入 1 或 2（必须选择）: "
+        if ! read_required_answer answer; then
+            die "无法读取安装模式。非交互运行时请设置 INSTALL_MODE=plugins 或 INSTALL_MODE=configure。"
+        fi
         case "${answer}" in
-            ""|n|N) return 1 ;;
-            y|Y) return 0 ;;
-            *) echo "请输入 y 或 n。" ;;
+            1)
+                INSTALL_MODE="plugins"
+                echo
+                return
+                ;;
+            2)
+                INSTALL_MODE="configure"
+                echo
+                return
+                ;;
+            *) echo "请输入 1 或 2，不能留空。" ;;
         esac
     done
 }
@@ -109,15 +160,6 @@ function prompt_int_default {
                 ;;
         esac
     done
-}
-
-function ask_fresh_install {
-    if ask_yes_no_default_no "是否为新安装？新安装会生成 multitool/multihotend.cfg [y/N]: "; then
-        FRESH_INSTALL=1
-    else
-        FRESH_INSTALL=0
-    fi
-    echo
 }
 
 function ask_frontend_choice {
@@ -219,10 +261,12 @@ function preflight_checks {
     if [ ! -d "${KLIPPER_PATH}/klippy/extras" ]; then
         die "未找到 Klipper 源码目录: ${KLIPPER_PATH}。如果路径不同，请用 KLIPPER_PATH=... 覆盖。"
     fi
-    if [ ! -d "${CONFIG_PATH}" ]; then
-        die "未找到 Klipper 配置目录: ${CONFIG_PATH}。如果你的配置目录不在默认位置，请用 CONFIG_PATH=... 覆盖。"
+    if [ "${INSTALL_MODE}" = "configure" ]; then
+        if [ ! -d "${CONFIG_PATH}" ]; then
+            die "未找到 Klipper 配置目录: ${CONFIG_PATH}。如果你的配置目录不在默认位置，请用 CONFIG_PATH=... 覆盖。"
+        fi
+        [ -w "${CONFIG_PATH}" ] || die "当前用户无权写入 Klipper 配置目录: ${CONFIG_PATH}"
     fi
-    [ -w "${CONFIG_PATH}" ] || die "当前用户无权写入 Klipper 配置目录: ${CONFIG_PATH}"
 }
 
 function sync_repo {
@@ -1173,22 +1217,28 @@ function restart_moonraker_if_needed {
 
 function install_frontend_if_requested {
     local stack_script="${INSTALL_PATH}/install_toolchanger_stack.sh"
-    local frontend_name
+    local frontend_name skip_moonraker_config
     if [ "${FRONTEND_CHOICE}" -eq 0 ]; then
         return
     fi
     [ -f "${stack_script}" ] || die "未找到 install_toolchanger_stack.sh: ${stack_script}"
+    skip_moonraker_config=0
+    if [ "${INSTALL_MODE}" = "plugins" ]; then
+        skip_moonraker_config=1
+    fi
     case "${FRONTEND_CHOICE}" in
         1)
             frontend_name="Fluidd"
             echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 ${frontend_name} 前端..."
-            SKIP_PLUGIN_INSTALL=1 TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
+            SKIP_PLUGIN_INSTALL=1 SKIP_MOONRAKER_CONFIG="${skip_moonraker_config}" \
+                TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
                 bash "${stack_script}" || die "安装/更新 ${frontend_name} 前端失败。"
             ;;
         2)
             frontend_name="Mainsail"
             echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 ${frontend_name} 前端..."
-            SKIP_PLUGIN_INSTALL=1 TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
+            SKIP_PLUGIN_INSTALL=1 SKIP_MOONRAKER_CONFIG="${skip_moonraker_config}" \
+                TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
                 FLUIDD_PATH="${HOME}/mainsail" \
                 FLUIDD_TOOLCHANGER_REPO="null01024/mainsail-toolchanger" \
                 FLUIDD_TOOLCHANGER_ASSET="mainsail.zip" \
@@ -1200,51 +1250,34 @@ function install_frontend_if_requested {
     esac
 }
 
-printf "\n=========================================\n"
-echo "- Klipper multitool-stats 安装/更新脚本 -"
-echo "视频安装教程: https://www.bilibili.com/video/BV1dYTM6MEh2"
-printf "=========================================\n\n"
+function print_plugins_completion {
+    cat <<EOF
 
-preflight_checks
-sync_repo
-ask_fresh_install
-ask_tool_calibration_scheme
-ask_frontend_choice
-link_extension
-link_moonraker_components
-patch_moonraker_lane_data_conf
-install_tool_calibration_python
-clean_orphan_links
-copy_config
-install_tool_calibration_config
-if [ "${FRESH_INSTALL}" -eq 1 ]; then
-    ask_toolchange_scheme
-    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
-        TOOL_HARDWARE_MODE="shared_extruder"
-    fi
-    generate_multihotend_config
-    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
-        install_cxchanger_config
-    fi
-    patch_fresh_install_tool_count_configs
-    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
-        patch_multitool_hooks_for_cxchanger
-    fi
-fi
-patch_printer_cfg
-restart_klipper
-restart_moonraker_if_needed
-install_frontend_if_requested
+[DONE] 插件/网页安装完成。
 
-cat <<EOF
+已处理：
+    - Klipper 插件链接及孤儿链接清理
+    - Moonraker 组件链接（如已安装 Moonraker）
+    - 配套前端（按本次前端选择执行）
 
-[DONE] 安装完成。
+按所选模式，本次未修改：
+    - ${CONFIG_PATH}/${CONFIG_SUBDIR}/ 下的配置
+    - ${CONFIG_PATH}/printer.cfg
+    - moonraker.conf
+
+EOF
+}
+
+function print_configure_completion {
+    cat <<EOF
+
+[DONE] 安装及换热端配置完成。
 
 默认配置已部署到：
     ${CONFIG_PATH}/${CONFIG_SUBDIR}/
         ${DEPLOYED_CONFIG_FILES}
 
-printer.cfg 顶部已自动加入：
+printer.cfg 已检查以下 include：
     ${INCLUDE_LINE}
 
 下一步：
@@ -1287,3 +1320,72 @@ printer.cfg 顶部已自动加入：
     install_script: install.sh
 
 EOF
+}
+
+function run_install {
+    preflight_checks
+    sync_repo
+
+    if [ "${INSTALL_MODE}" = "configure" ]; then
+        FRESH_INSTALL=1
+        ask_tool_calibration_scheme
+    else
+        FRESH_INSTALL=0
+        TOOL_CALIBRATION_SCHEME="none"
+        DEPLOYED_CONFIG_FILES=""
+    fi
+
+    ask_frontend_choice
+    link_extension
+    link_moonraker_components
+
+    if [ "${INSTALL_MODE}" = "configure" ]; then
+        patch_moonraker_lane_data_conf
+        install_tool_calibration_python
+    fi
+
+    clean_orphan_links
+
+    if [ "${INSTALL_MODE}" = "configure" ]; then
+        copy_config
+        install_tool_calibration_config
+        ask_toolchange_scheme
+        if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
+            TOOL_HARDWARE_MODE="shared_extruder"
+        fi
+        generate_multihotend_config
+        if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
+            install_cxchanger_config
+        fi
+        patch_fresh_install_tool_count_configs
+        if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
+            patch_multitool_hooks_for_cxchanger
+        fi
+        patch_printer_cfg
+    fi
+
+    restart_klipper
+    restart_moonraker_if_needed
+    install_frontend_if_requested
+
+    if [ "${INSTALL_MODE}" = "configure" ]; then
+        print_configure_completion
+    else
+        print_plugins_completion
+    fi
+}
+
+function main {
+    printf "\n=========================================\n"
+    echo "- Klipper multitool-stats 安装/更新脚本 -"
+    echo "视频安装教程: https://www.bilibili.com/video/BV1dYTM6MEh2"
+    printf "=========================================\n\n"
+
+    ask_install_mode
+    run_install
+}
+
+__script_source="${BASH_SOURCE:-${0}}"
+if [ "${__script_source}" = "${0}" ]; then
+    main "$@"
+fi

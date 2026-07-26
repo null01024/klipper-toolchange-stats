@@ -26,6 +26,7 @@ FRONTEND_TOOLCHANGER_NAME="${FRONTEND_TOOLCHANGER_NAME:-fluidd-toolchanger}"
 FRONTEND_UPDATE_MANAGER_NAME="${FRONTEND_UPDATE_MANAGER_NAME:-fluidd-toolchanger}"
 GH_PROXY="${GH_PROXY:-}"
 SKIP_PLUGIN_INSTALL="${SKIP_PLUGIN_INSTALL:-0}"
+SKIP_MOONRAKER_CONFIG="${SKIP_MOONRAKER_CONFIG:-0}"
 
 TMP_DIRS=""
 RED="\033[0;31m"
@@ -176,7 +177,8 @@ function run_plugin_installer {
     fi
 
     if [ -n "${installer}" ]; then
-        TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" bash "${installer}" || die "执行插件安装脚本失败: ${installer}"
+        INSTALL_MODE=plugins TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
+            bash "${installer}" || die "执行插件安装脚本失败: ${installer}"
         return
     fi
 
@@ -184,7 +186,8 @@ function run_plugin_installer {
     installer="${tmp}/install.sh"
     installer_url="${KLIPPER_STATS_REPO_RAW%/}/install.sh"
     download_url "${installer_url}" "${installer}"
-    TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" bash "${installer}" || die "执行下载的插件安装脚本失败: ${installer_url}"
+    INSTALL_MODE=plugins TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
+        bash "${installer}" || die "执行下载的插件安装脚本失败: ${installer_url}"
 }
 
 function check_existing_fluidd {
@@ -426,6 +429,7 @@ GH_PROXY: ${GH_PROXY:-未启用}
 前端目录: ${FLUIDD_PATH}
 前端包名: ${FLUIDD_TOOLCHANGER_ASSET}
 插件安装: $([ "${SKIP_PLUGIN_INSTALL}" = "1" ] && printf "跳过" || printf "执行")
+Moonraker 配置: $([ "${SKIP_MOONRAKER_CONFIG}" = "1" ] && printf "跳过" || printf "自动更新")
 
 EOF
 
@@ -433,7 +437,11 @@ EOF
     check_existing_fluidd
     run_plugin_installer
     install_or_update_fluidd_toolchanger
-    patch_moonraker_conf
+    if [ "${SKIP_MOONRAKER_CONFIG}" = "1" ]; then
+        echo "[SKIP] 按安装模式要求，不修改 moonraker.conf。"
+    else
+        patch_moonraker_conf
+    fi
 
     cat <<EOF
 
@@ -442,7 +450,7 @@ EOF
 已处理：
     - klipper-toolchange-stats 插件
     - ${FRONTEND_TOOLCHANGER_NAME} 前端 (${FLUIDD_PATH})
-    - moonraker.conf update_manager 配置（如配置文件存在）
+    - moonraker.conf update_manager 配置：$([ "${SKIP_MOONRAKER_CONFIG}" = "1" ] && printf "已跳过" || printf "已检查")
 
 再次执行本脚本即可更新插件和前端。
 
