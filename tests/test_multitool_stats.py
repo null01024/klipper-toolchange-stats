@@ -1,3 +1,5 @@
+import ast
+import shlex
 import sys
 import unittest
 from datetime import date
@@ -12,12 +14,28 @@ import multitool_stats as stats_module
 
 
 class FakeGcode:
-    def __init__(self):
+    def __init__(self, save_variables):
+        self.save_variables = save_variables
         self.commands = []
         self.messages = []
+        self.fail_variable = None
 
     def run_script_from_command(self, command):
         self.commands.append(command)
+        name, _, rawparams = command.partition(' ')
+        if name != 'SAVE_VARIABLE':
+            return
+
+        lexer = shlex.shlex(rawparams, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = '#;'
+        params = dict(part.split('=', 1) for part in lexer)
+        variable = params['VARIABLE']
+        if variable == self.fail_variable:
+            self.fail_variable = None
+            raise RuntimeError('simulated persistence failure')
+        self.save_variables.allVariables[variable] = ast.literal_eval(
+            params['VALUE'])
 
     def respond_info(self, message):
         self.messages.append(message)
@@ -25,13 +43,13 @@ class FakeGcode:
 
 class FakeSaveVariables:
     def __init__(self, variables=None):
-        self.allVariables = variables or {}
+        self.allVariables = dict(variables or {})
 
 
 class FakePrinter:
     def __init__(self, variables=None):
-        self.gcode = FakeGcode()
         self.save_variables = FakeSaveVariables(variables)
+        self.gcode = FakeGcode(self.save_variables)
         self.handlers = {}
 
     def lookup_object(self, name, default=None):
@@ -105,21 +123,44 @@ class MultitoolDailyStatsTest(unittest.TestCase):
         daily = stats.get_status(0.0)['tc_daily']
         self.assertEqual(2, daily[-2]['count'])
         self.assertEqual(1, daily[-1]['count'])
-        self.assertTrue(
-            any(
-                command == (
-                    'SAVE_VARIABLE VARIABLE=tc_total_daily '
-                    'VALUE=[{"date":"2026-07-15","count":0},'
-                    '{"date":"2026-07-16","count":0},'
-                    '{"date":"2026-07-17","count":0},'
-                    '{"date":"2026-07-18","count":0},'
-                    '{"date":"2026-07-19","count":0},'
-                    '{"date":"2026-07-20","count":2},'
-                    '{"date":"2026-07-21","count":1}]'
-                )
-                for command in gcode.commands
-            )
+        self.assertEqual(
+            daily,
+            gcode.save_variables.allVariables['tc_total_daily'],
         )
+
+        reloaded, _ = self.make_stats(
+            current_day[0], gcode.save_variables.allVariables)
+        self.assertEqual(daily, reloaded.get_status(0.0)['tc_daily'])
+
+    def test_persistence_failure_does_not_abort_and_next_commit_catches_up(self):
+        stats, gcode = self.make_stats(date(2026, 7, 21))
+        gcode.fail_variable = 'tc_total_daily'
+
+        with self.assertLogs(level='ERROR') as logs, patch.object(
+                stats_module, 'monotonic',
+                side_effect=[10.0, 12.0, 20.0, 23.0]):
+            stats.tc_begin()
+            stats.tc_commit()
+            stats.tc_begin()
+            stats.tc_commit()
+
+        status = stats.get_status(0.0)
+        self.assertEqual(2, status['tc_total']['count'])
+        self.assertEqual(2, status['tc_daily'][-1]['count'])
+        self.assertEqual(
+            status['tc_daily'],
+            gcode.save_variables.allVariables['tc_total_daily'],
+        )
+        self.assertEqual(
+            2, gcode.save_variables.allVariables['tc_total_count'])
+        self.assertTrue(any(
+            '统计保存失败，本次换头继续' in message
+            for message in gcode.messages
+        ))
+        self.assertTrue(any(
+            'failed to persist statistics' in message
+            for message in logs.output
+        ))
 
     def test_abort_and_invalid_persisted_entries_do_not_add_counts(self):
         stats, _ = self.make_stats(

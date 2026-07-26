@@ -15,6 +15,8 @@
 # (multitoolr_stats → multitool_stats) 后历史数据自动延续。
 
 import json
+import logging
+import shlex
 from datetime import date, timedelta
 from time import monotonic
 
@@ -204,22 +206,35 @@ class MultitoolStats:
             % (count, elapsed, avg))
 
     def _save_total(self):
-        keys = self._persist_keys
-        cmds = [
-            "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
-            % (keys['count'], self._total['count']),
-            "SAVE_VARIABLE VARIABLE=%s VALUE=%.6f"
-            % (keys['elapsed'], self._total['elapsed']),
-        ]
-        for s in TOOLCHANGE_STAGES:
-            cmds.append("SAVE_VARIABLE VARIABLE=%s VALUE=%.6f"
-                        % (keys[s], self._total['stages'][s]))
-        daily_value = json.dumps(
-            self._daily_window(), separators=(',', ':'))
-        cmds.append("SAVE_VARIABLE VARIABLE=%s VALUE=%s"
-                    % (keys['daily'], daily_value))
-        for c in cmds:
-            self.gcode.run_script_from_command(c)
+        try:
+            keys = self._persist_keys
+            cmds = [
+                "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
+                % (keys['count'], self._total['count']),
+                "SAVE_VARIABLE VARIABLE=%s VALUE=%.6f"
+                % (keys['elapsed'], self._total['elapsed']),
+            ]
+            for s in TOOLCHANGE_STAGES:
+                cmds.append("SAVE_VARIABLE VARIABLE=%s VALUE=%.6f"
+                            % (keys[s], self._total['stages'][s]))
+            daily_value = json.dumps(
+                self._daily_window(), separators=(',', ':'))
+            cmds.append("SAVE_VARIABLE VARIABLE=%s VALUE=%s"
+                        % (keys['daily'], shlex.quote(daily_value)))
+            for c in cmds:
+                self.gcode.run_script_from_command(c)
+        except Exception as e:
+            logging.exception(
+                "multitool_stats: failed to persist statistics")
+            try:
+                self.gcode.respond_info(
+                    "[multitool_stats] 统计保存失败，本次换头继续；"
+                    "内存累计将在下次成功保存时补写: %s" % e)
+            except Exception:
+                logging.exception(
+                    "multitool_stats: failed to report persistence error")
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # 暴露给 G-code 模板的状态
