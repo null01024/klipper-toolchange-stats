@@ -1,6 +1,7 @@
 import os
 import shlex
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,51 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = REPO_ROOT / 'install.sh'
 STACK_SCRIPT = REPO_ROOT / 'install_toolchanger_stack.sh'
+PLUGIN_SCRIPT = REPO_ROOT / 'install_klipper_plugins.sh'
+
+
+class KlipperPluginInstallScriptTest(unittest.TestCase):
+    def test_removes_retired_repo_links_but_preserves_other_links(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            install_path = root / 'repo'
+            repo_extras = install_path / 'klipper' / 'extras'
+            klipper_path = root / 'klipper'
+            installed_extras = klipper_path / 'klippy' / 'extras'
+            repo_extras.mkdir(parents=True)
+            installed_extras.mkdir(parents=True)
+
+            adapter_name = 'closed_loop_motor_zdt_emm42_v5_can.py'
+            (repo_extras / adapter_name).write_text('# adapter\n')
+            retired_names = (
+                'zdt_emm42.py',
+                'zdt_emm42_group.py',
+                'zdt_emm42_xy_group.py',
+            )
+            for name in retired_names:
+                (installed_extras / name).symlink_to(repo_extras / name)
+            unrelated = installed_extras / 'unrelated.py'
+            unrelated.symlink_to(root / 'other-project' / 'unrelated.py')
+
+            env = os.environ.copy()
+            env.update({
+                'INSTALL_PATH': str(install_path),
+                'KLIPPER_PATH': str(klipper_path),
+            })
+            result = subprocess.run(
+                ['bash', str(PLUGIN_SCRIPT)],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((installed_extras / adapter_name).is_symlink())
+            self.assertTrue(all(
+                not (installed_extras / name).is_symlink()
+                for name in retired_names))
+            self.assertTrue(unrelated.is_symlink())
 
 
 class InstallScriptTest(unittest.TestCase):

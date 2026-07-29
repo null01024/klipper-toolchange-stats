@@ -85,11 +85,34 @@ function install_klipper_plugins {
     done
 }
 
+function clean_orphan_links {
+    local repo_extras extras_dir target resolved
+
+    repo_extras="${INSTALL_PATH}/klipper/extras"
+    extras_dir="${KLIPPER_PATH}/klippy/extras"
+
+    echo "[CLEAN] 清理本仓库遗留的孤儿软链..."
+    for target in "${extras_dir}"/*.py; do
+        [ -L "${target}" ] || continue
+        resolved="$(readlink "${target}" 2>/dev/null || true)"
+        case "${resolved}" in
+            "${repo_extras}"/*)
+                if [ ! -e "${target}" ]; then
+                    rm -f "${target}" || die "移除孤儿软链接失败: ${target}"
+                    echo "  -> $(basename "${target}")"
+                fi
+                ;;
+        esac
+    done
+}
+
 require_command basename
 require_command dirname
 require_command ln
 require_command readlink
+require_command rm
 
 install_klipper_plugins
+clean_orphan_links
 
 echo "[DONE] Klipper 插件安装完成。"

@@ -170,8 +170,6 @@ class ClosedLoopThreeZGroup:
     def _member_object_name(self, name):
         if name.lower().startswith('closed_loop_motor '):
             return name
-        if name.lower().startswith('zdt_emm42 '):
-            name = name.split(None, 1)[1]
         return closed_loop_core.motor_object_name(name)
 
     def _handle_connect(self):
@@ -231,7 +229,6 @@ class ClosedLoopThreeZGroup:
         return {
             'name': member.closed_loop_name(),
             'object': member.closed_loop_object_name(),
-            'addr': address,
             'address': address,
             'vendor': vendor,
             'model': model,
@@ -384,10 +381,11 @@ class ClosedLoopThreeZGroup:
             sample = {
                 'time': max(float(value['time']) for value in aligned),
                 'members': [{
-                    'name': member.closed_loop_name(),
+                    'name': snapshot['name'],
+                    'address': snapshot['address'],
                     'error_deg': value.get('error_deg'),
                     'error_mm': value.get('error_mm'),
-                } for member, value in zip(self.members, aligned)],
+                } for snapshot, value in zip(snapshots, aligned)],
                 'max_abs_error_deg': max(abs(value)
                                          for value in aligned_deg),
                 'max_abs_error_mm': (
@@ -443,8 +441,8 @@ class ClosedLoopThreeZGroup:
         ]
         for member in status['members']:
             lines.append(
-                '%s addr=%s online=%s error=%s deg PID=%s/%s/%s' % (
-                    member['name'], member['addr'], member['online'],
+                '%s address=%s online=%s error=%s deg PID=%s/%s/%s' % (
+                    member['name'], member['address'], member['online'],
                     self._fmt(member.get('error_deg')),
                     member.get('pid_kp'), member.get('pid_ki'),
                     member.get('pid_kd')))

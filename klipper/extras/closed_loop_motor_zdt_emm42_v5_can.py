@@ -1,15 +1,14 @@
-# zdt_emm42.py
-# Klipper extra module for monitoring ZHANGDATOU/ZDT Emm42_V5.0 closed-loop stepper
-# through its custom CAN protocol while motion is still driven by STEP/DIR/EN.
-#
-# Install:
-#   cp zdt_emm42.py ~/klipper/klippy/extras/zdt_emm42.py
-#   sudo systemctl restart klipper
+# ZDT EMM42 V5 CAN adapter for the generic closed-loop motor interface.
+# Motion is still driven by STEP/DIR/EN; this adapter uses the vendor CAN
+# protocol for telemetry, settings, and position-loop tuning.
 #
 # Example printer.cfg:
-#   [zdt_emm42 shadow_a]
-#   can_interface: can0
-#   addr: 1
+#   [closed_loop_motor shadow_a]
+#   vendor: zdt
+#   model: emm42_v5
+#   transport: can
+#   interface: can0
+#   address: 1
 #   can_payload_includes_addr: False
 #   can_filter: ext            # off | ext (default) | addr
 #   checksum_mode: 0x6B        # 0x6B (default) | xor | crc8 (crc8 unverified)
@@ -268,26 +267,20 @@ def _parse_hex_bytes(value):
     return bytes(out)
 
 
-class ZdtEmm42:
-    def __init__(self, config, vendor='zdt', model='emm42_v5',
-                 transport_type='can'):
+class ZdtEmm42V5Can:
+    def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
 
         section = config.get_name().split(None, 1)
         self.name = section[1] if len(section) > 1 else "default"
-        self.vendor = vendor
-        self.model = model
-        self.transport_type = transport_type
-        canonical_config = section[0].lower() == 'closed_loop_motor'
-        if canonical_config:
-            self.can_interface = config.get('interface', 'can0')
-            self.addr = config.getint(
-                'address', 1, minval=1, maxval=255)
-        else:
-            self.can_interface = config.get('can_interface', 'can0')
-            self.addr = config.getint('addr', 1, minval=1, maxval=255)
+        self.vendor = 'zdt'
+        self.model = 'emm42_v5'
+        self.transport_type = 'can'
+        self.can_interface = config.get('interface', 'can0')
+        self.addr = config.getint(
+            'address', 1, minval=1, maxval=255)
         self.check_byte = config.getint('check_byte', 0x6B, minval=0, maxval=255)
         self.can_payload_includes_addr = config.getboolean(
             'can_payload_includes_addr', False)
@@ -463,8 +456,6 @@ class ZdtEmm42:
             'polling_enabled': False,
             'capabilities': list(closed_loop_core.MOTOR_CAPABILITIES),
             'online': False,
-            'can_interface': getattr(self, 'can_interface', ''),
-            'addr': getattr(self, 'addr', 0),
             'last_update_time': 0.0,
             'error_poll_interval': getattr(self, 'error_poll_interval', 0.05),
             'error_history': [],
@@ -2989,11 +2980,3 @@ class ZdtEmm42:
             return '%.6f' % float(value)
         except Exception:
             return str(value)
-
-
-def load_config_prefix(config):
-    return closed_loop_core.register_legacy_motor(config)
-
-
-def load_config(config):
-    return closed_loop_core.register_legacy_motor(config)

@@ -157,7 +157,7 @@ def make_group():
     return group
 
 
-class ZdtEmm42XYGroupTest(unittest.TestCase):
+class ClosedLoopCoreXYGroupTest(unittest.TestCase):
     def test_collects_two_member_sample_and_reports_corexy_type(self):
         group = make_group()
 
@@ -169,6 +169,12 @@ class ZdtEmm42XYGroupTest(unittest.TestCase):
         self.assertEqual(
             [value['name'] for value in group.history[-1]['members']],
             ['motor_a', 'motor_b'])
+        self.assertEqual(
+            [value['address'] for value in group.history[-1]['members']],
+            [4, 5])
+        self.assertTrue(all(
+            'addr' not in value
+            for value in group.history[-1]['members']))
         self.assertAlmostEqual(group.last['max_abs_error_deg'], 1.0)
         self.assertAlmostEqual(group.last['spread_deg'], 1.5)
 

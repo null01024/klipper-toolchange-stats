@@ -59,24 +59,8 @@ GROUP_MEMBER_API = (
 )
 
 
-class LegacyConfigShim:
-    """Keeps a legacy config section loaded without publishing old status."""
-
-    def __init__(self, canonical_object):
-        self.canonical_object = canonical_object
-
-
-def instance_name(config):
-    section = config.get_name().split(None, 1)
-    return section[1] if len(section) > 1 else 'default'
-
-
 def motor_object_name(name):
     return '%s %s' % (MOTOR_OBJECT_TYPE, name)
-
-
-def group_object_name(name):
-    return '%s %s' % (GROUP_OBJECT_TYPE, name)
 
 
 def validate_group_member(member, group_type='three_z'):
@@ -126,9 +110,7 @@ def normalize_position_error_sample(sample):
     return normalized
 
 
-def _identity(config, legacy):
-    if legacy:
-        return ZDT_VENDOR, ZDT_MODEL, CAN_TRANSPORT
+def _identity(config):
     vendor = str(config.get('vendor', '')).strip().lower()
     model = str(config.get('model', '')).strip().lower()
     transport = str(config.get('transport', '')).strip().lower()
@@ -143,23 +125,20 @@ def _identity(config, legacy):
     return identity
 
 
-def create_motor(config, legacy=False):
-    vendor, model, transport = _identity(config, legacy)
+def create_motor(config):
+    vendor, model, transport = _identity(config)
     if (vendor, model, transport) == (
             ZDT_VENDOR, ZDT_MODEL, CAN_TRANSPORT):
         try:
-            from . import zdt_emm42
+            from . import closed_loop_motor_zdt_emm42_v5_can as adapter
         except ImportError:
-            import zdt_emm42
-        return zdt_emm42.ZdtEmm42(
-            config, vendor=vendor, model=model,
-            transport_type=transport)
+            import closed_loop_motor_zdt_emm42_v5_can as adapter
+        return adapter.ZdtEmm42V5Can(config)
     raise config.error('closed_loop_motor: no adapter factory registered')
 
 
-def create_group(config, group_type=None):
-    if group_type is None:
-        group_type = str(config.get('group_type', '')).strip().lower()
+def create_group(config):
+    group_type = str(config.get('group_type', '')).strip().lower()
     if group_type == 'three_z':
         try:
             from . import closed_loop_motor_three_z_group as group_module
@@ -175,28 +154,3 @@ def create_group(config, group_type=None):
     raise config.error(
         "closed_loop_motor_group: group_type must be 'three_z' or "
         "'corexy'")
-
-
-def register_legacy_motor(config):
-    printer = config.get_printer()
-    name = instance_name(config)
-    canonical = motor_object_name(name)
-    if printer.lookup_object(canonical, None) is not None:
-        raise config.error(
-            "closed_loop_motor '%s' is configured more than once" % name)
-    controller = create_motor(config, legacy=True)
-    printer.add_object(canonical, controller)
-    return LegacyConfigShim(canonical)
-
-
-def register_legacy_group(config, group_type):
-    printer = config.get_printer()
-    name = instance_name(config)
-    canonical = group_object_name(name)
-    if printer.lookup_object(canonical, None) is not None:
-        raise config.error(
-            "closed_loop_motor_group '%s' is configured more than once" %
-            name)
-    controller = create_group(config, group_type=group_type)
-    printer.add_object(canonical, controller)
-    return LegacyConfigShim(canonical)

@@ -11,7 +11,8 @@ EXTRAS_PATH = Path(__file__).resolve().parents[1] / 'klipper' / 'extras'
 sys.path.insert(0, str(EXTRAS_PATH))
 CORE = importlib.import_module('closed_loop_motor_core')
 TRANSPORT = importlib.import_module('closed_loop_motor_transport')
-ZDT = importlib.import_module('zdt_emm42')
+ZDT_ADAPTER = importlib.import_module(
+    'closed_loop_motor_zdt_emm42_v5_can')
 MOTOR_LOADER = importlib.import_module('closed_loop_motor')
 GROUP_LOADER = importlib.import_module('closed_loop_motor_group')
 
@@ -141,6 +142,7 @@ class ClosedLoopMotorArchitectureTest(unittest.TestCase):
 
         controller = CORE.create_motor(config)
 
+        self.assertIsInstance(controller, ZDT_ADAPTER.ZdtEmm42V5Can)
         self.assertEqual(
             controller.closed_loop_identity(),
             ('zdt', 'emm42_v5', 'can'))
@@ -153,6 +155,10 @@ class ClosedLoopMotorArchitectureTest(unittest.TestCase):
         status = controller._empty_status()
         self.assertEqual(status['schema_version'], 1)
         self.assertEqual(status['object_type'], 'closed_loop_motor')
+        self.assertEqual(status['interface'], 'can2')
+        self.assertEqual(status['address'], 7)
+        self.assertNotIn('can_interface', status)
+        self.assertNotIn('addr', status)
 
     def test_unsupported_catalog_entry_fails_before_adapter_creation(self):
         config = FakeConfig(FakePrinter(), values={
@@ -164,19 +170,19 @@ class ClosedLoopMotorArchitectureTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unsupported'):
             CORE.create_motor(config)
 
-    def test_legacy_loader_publishes_only_canonical_status_object(self):
-        printer = FakePrinter()
-        config = FakeConfig(printer, name='zdt_emm42 z_left')
-        controller = object()
+    def test_legacy_config_entrypoints_are_removed(self):
+        retired = (
+            'zdt_emm42.py',
+            'zdt_emm42_group.py',
+            'zdt_emm42_xy_group.py',
+        )
 
-        with mock.patch.object(CORE, 'create_motor', return_value=controller):
-            shim = CORE.register_legacy_motor(config)
-
-        self.assertIs(
-            printer.objects['closed_loop_motor z_left'], controller)
-        self.assertFalse(hasattr(shim, 'get_status'))
-        self.assertEqual(
-            shim.canonical_object, 'closed_loop_motor z_left')
+        self.assertTrue(all(
+            not (EXTRAS_PATH / filename).exists()
+            for filename in retired))
+        self.assertFalse(hasattr(CORE, 'register_legacy_motor'))
+        self.assertFalse(hasattr(CORE, 'register_legacy_group'))
+        self.assertFalse(hasattr(CORE, 'group_object_name'))
 
     def test_socketcan_endpoint_is_shared_and_routes_by_address(self):
         printer = FakePrinter()

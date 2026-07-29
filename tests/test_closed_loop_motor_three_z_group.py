@@ -153,7 +153,7 @@ def make_group():
     return group
 
 
-class ZdtEmm42GroupTest(unittest.TestCase):
+class ClosedLoopThreeZGroupTest(unittest.TestCase):
     def test_collects_one_aligned_three_member_sample(self):
         group = make_group()
 
@@ -165,6 +165,10 @@ class ZdtEmm42GroupTest(unittest.TestCase):
         self.assertEqual(
             [value['name'] for value in sample['members']],
             ['z_left', 'z_right', 'z_rear'])
+        self.assertEqual(
+            [value['address'] for value in sample['members']], [1, 2, 3])
+        self.assertTrue(all(
+            'addr' not in value for value in sample['members']))
         self.assertAlmostEqual(sample['max_abs_error_deg'], 1.0)
         self.assertAlmostEqual(sample['spread_deg'], 1.5)
         self.assertFalse(group.last['warning'])

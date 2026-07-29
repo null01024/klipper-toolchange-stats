@@ -163,8 +163,8 @@ class ClosedLoopCoreXYGroup(group_base.ClosedLoopThreeZGroup):
         ]
         for member in status['members']:
             lines.append(
-                '%s addr=%s online=%s error=%s deg PID=%s/%s/%s' % (
-                    member['name'], member['addr'], member['online'],
+                '%s address=%s online=%s error=%s deg PID=%s/%s/%s' % (
+                    member['name'], member['address'], member['online'],
                     self._fmt(member.get('error_deg')),
                     member.get('pid_kp'), member.get('pid_ki'),
                     member.get('pid_kd')))
