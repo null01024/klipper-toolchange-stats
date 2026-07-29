@@ -1,4 +1,8 @@
 *.pdf
+*.md
+*.markdown
+*.rst
+*.adoc
 local/
 .*/
-docs/*
+docs/

@@ -27,23 +27,21 @@
 #   pid_write_settle_time: 0.05
 #
 # G-code:
-#   ZDT_EMM_STATUS NAME=shadow_a
-#   ZDT_EMM_QUERY  NAME=shadow_a CMD=0x36
-#   ZDT_EMM_QUERY  NAME=shadow_a CMD=0x42 DATA=6C   ; DATA appends extra request bytes
-#   ZDT_EMM_SNIFF  NAME=shadow_a SECONDS=2          ; capture raw CAN frames for debugging
-#   ZDT_EMM_LOG    NAME=shadow_a ENABLE=1
-#   ZDT_EMM_LOG    NAME=shadow_a ENABLE=0
-#   ZDT_EMM_POLL   NAME=shadow_a ENABLE=1
-#   ZDT_EMM_AUTOTUNE NAME=shadow_a AXIS=X DISTANCE=10 SPEED=20 ACCEL=200 ITERATIONS=20 CONFIRM=1
-#   ZDT_EMM_AUTOTUNE NAME=shadow_a PROFILE=COREXY_PRINT DISTANCE=100 SPEED=200 ACCEL=5000 ITERATIONS=20 REPEATS=3 MAX_ERROR_DEG=6.5 CONFIRM=1
-#   ZDT_EMM_AUTOTUNE_CANCEL NAME=shadow_a
+#   CLOSED_LOOP_MOTOR_STATUS NAME=shadow_a
+#   CLOSED_LOOP_MOTOR_QUERY NAME=shadow_a CMD=0x36
+#   CLOSED_LOOP_MOTOR_QUERY NAME=shadow_a CMD=0x42 DATA=6C
+#   CLOSED_LOOP_MOTOR_SNIFF NAME=shadow_a SECONDS=2
+#   CLOSED_LOOP_MOTOR_LOG NAME=shadow_a ENABLE=1
+#   CLOSED_LOOP_MOTOR_POLL NAME=shadow_a ENABLE=1
+#   CLOSED_LOOP_MOTOR_AUTOTUNE NAME=shadow_a AXIS=X CONFIRM=1
+#   CLOSED_LOOP_MOTOR_AUTOTUNE_CANCEL NAME=shadow_a
 #
 # Notes:
 # - Emm42 must be set to CAN1_MAP, extended CAN frame, and the same bus bitrate as can0.
 # - This module uses Linux SocketCAN directly, not Klipper's MCU CAN protocol.
 # - Reception is asynchronous via the Klipper reactor (register_fd); the poll timer only
 #   sends one short read command per tick and never blocks waiting for the reply.
-# - The normal monitor only issues read commands.  ZDT_EMM_AUTOTUNE is the explicit
+# - The normal monitor only issues read commands. Autotune is the explicit
 #   opt-in command that temporarily writes the position-loop PID while exercising
 #   one user-selected Klipper axis.
 
@@ -56,6 +54,13 @@ import select
 import socket
 import struct
 import time
+
+try:
+    from . import closed_loop_motor_core as closed_loop_core
+    from . import closed_loop_motor_transport as closed_loop_transport
+except ImportError:
+    import closed_loop_motor_core as closed_loop_core
+    import closed_loop_motor_transport as closed_loop_transport
 
 CAN_EFF_FLAG = 0x80000000
 CAN_RTR_FLAG = 0x40000000
@@ -264,15 +269,25 @@ def _parse_hex_bytes(value):
 
 
 class ZdtEmm42:
-    def __init__(self, config):
+    def __init__(self, config, vendor='zdt', model='emm42_v5',
+                 transport_type='can'):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
 
         section = config.get_name().split(None, 1)
         self.name = section[1] if len(section) > 1 else "default"
-        self.can_interface = config.get('can_interface', 'can0')
-        self.addr = config.getint('addr', 1, minval=1, maxval=255)
+        self.vendor = vendor
+        self.model = model
+        self.transport_type = transport_type
+        canonical_config = section[0].lower() == 'closed_loop_motor'
+        if canonical_config:
+            self.can_interface = config.get('interface', 'can0')
+            self.addr = config.getint(
+                'address', 1, minval=1, maxval=255)
+        else:
+            self.can_interface = config.get('can_interface', 'can0')
+            self.addr = config.getint('addr', 1, minval=1, maxval=255)
         self.check_byte = config.getint('check_byte', 0x6B, minval=0, maxval=255)
         self.can_payload_includes_addr = config.getboolean(
             'can_payload_includes_addr', False)
@@ -316,6 +331,14 @@ class ZdtEmm42:
 
         self.sock = None
         self.fd_handle = None
+        self.transport_endpoint = closed_loop_transport.get_transport_manager(
+            self.printer).socketcan(self.can_interface)
+        try:
+            self.transport_endpoint.register(
+                self, self.addr, self._handle_transport_frame)
+        except closed_loop_transport.TransportError as exc:
+            raise config.error(str(exc))
+        self.sync_request = None
         self.timer = None
         self.error_timer = None
         self.enabled = False
@@ -358,42 +381,43 @@ class ZdtEmm42:
         self.printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
 
         self.gcode.register_mux_command(
-            'ZDT_EMM_STATUS', 'NAME', self.name, self.cmd_STATUS,
-            desc='Report latest ZDT Emm42 CAN monitor values')
+            'CLOSED_LOOP_MOTOR_STATUS', 'NAME', self.name, self.cmd_STATUS,
+            desc='Report latest closed-loop motor values')
         self.gcode.register_mux_command(
-            'ZDT_EMM_QUERY', 'NAME', self.name, self.cmd_QUERY,
-            desc='Send one raw short read command to a ZDT Emm42')
+            'CLOSED_LOOP_MOTOR_QUERY', 'NAME', self.name, self.cmd_QUERY,
+            desc='Send one driver-specific raw query')
         self.gcode.register_mux_command(
-            'ZDT_EMM_SNIFF', 'NAME', self.name, self.cmd_SNIFF,
-            desc='Capture raw CAN frames to verify the ZDT Emm42 reply framing')
+            'CLOSED_LOOP_MOTOR_SNIFF', 'NAME', self.name, self.cmd_SNIFF,
+            desc='Capture raw transport frames for diagnostics')
         self.gcode.register_mux_command(
-            'ZDT_EMM_LOG', 'NAME', self.name, self.cmd_LOG,
-            desc='Enable or disable CSV logging for ZDT Emm42 monitor')
+            'CLOSED_LOOP_MOTOR_LOG', 'NAME', self.name, self.cmd_LOG,
+            desc='Enable or disable closed-loop motor CSV logging')
         self.gcode.register_mux_command(
-            'ZDT_EMM_POLL', 'NAME', self.name, self.cmd_POLL,
-            desc='Enable or disable periodic ZDT Emm42 polling')
+            'CLOSED_LOOP_MOTOR_POLL', 'NAME', self.name, self.cmd_POLL,
+            desc='Enable or disable closed-loop motor polling')
         self.gcode.register_mux_command(
-            'ZDT_EMM_AUTOTUNE', 'NAME', self.name, self.cmd_AUTOTUNE,
-            desc='Tune ZDT Emm42 position-loop PID using a safe axis motion')
+            'CLOSED_LOOP_MOTOR_AUTOTUNE', 'NAME', self.name,
+            self.cmd_AUTOTUNE,
+            desc='Tune a closed-loop motor using a safe axis motion')
         self.gcode.register_mux_command(
-            'ZDT_EMM_AUTOTUNE_CANCEL', 'NAME', self.name,
+            'CLOSED_LOOP_MOTOR_AUTOTUNE_CANCEL', 'NAME', self.name,
             self.cmd_AUTOTUNE_CANCEL,
-            desc='Request cancellation of an active ZDT Emm42 autotune')
+            desc='Request cancellation of an active motor autotune')
         self.gcode.register_mux_command(
-            'ZDT_EMM_CONFIG_REFRESH', 'NAME', self.name,
+            'CLOSED_LOOP_MOTOR_CONFIG_REFRESH', 'NAME', self.name,
             self.cmd_CONFIG_REFRESH,
-            desc='Read ZDT Emm42 driver configuration and position PID')
+            desc='Read closed-loop motor configuration and position PID')
         self.gcode.register_mux_command(
-            'ZDT_EMM_CONFIG_SET', 'NAME', self.name,
+            'CLOSED_LOOP_MOTOR_CONFIG_SET', 'NAME', self.name,
             self.cmd_CONFIG_SET,
-            desc='Temporarily update printer-relevant EMM42 driver settings')
+            desc='Temporarily update driver-specific motor settings')
         self.gcode.register_mux_command(
-            'ZDT_EMM_PID_SET', 'NAME', self.name, self.cmd_PID_SET,
-            desc='Update the ZDT Emm42 position-loop PID')
+            'CLOSED_LOOP_MOTOR_PID_SET', 'NAME', self.name, self.cmd_PID_SET,
+            desc='Update a closed-loop motor position-loop PID')
         self.gcode.register_mux_command(
-            'ZDT_EMM_CONFIG_STORE', 'NAME', self.name,
+            'CLOSED_LOOP_MOTOR_CONFIG_STORE', 'NAME', self.name,
             self.cmd_CONFIG_STORE,
-            desc='Persist the current EMM42 driver configuration and PID')
+            desc='Persist current driver configuration and PID')
 
     def _parse_checksum_mode(self, config):
         cs = config.get('checksum_mode', '0x6B').strip().lower()
@@ -417,9 +441,27 @@ class ZdtEmm42:
         raise config.error(
             "zdt_emm42: invalid can_filter '%s' (use off, ext or addr)" % cf)
 
+    def _sniff_accepts_frame(self, extended, frame_id):
+        if self.can_filter == 'off':
+            return True
+        if not extended:
+            return False
+        return (self.can_filter != 'addr' or
+                ((frame_id >> 8) & 0xFF) == self.addr)
+
     def _empty_status(self):
         return {
+            'schema_version': closed_loop_core.SCHEMA_VERSION,
+            'object_type': closed_loop_core.MOTOR_OBJECT_TYPE,
             'name': getattr(self, 'name', 'default'),
+            'vendor': getattr(self, 'vendor', 'zdt'),
+            'model': getattr(self, 'model', 'emm42_v5'),
+            'transport': getattr(self, 'transport_type', 'can'),
+            'interface': getattr(self, 'can_interface', ''),
+            'address': getattr(self, 'addr', 0),
+            'connection_state': 'unknown',
+            'polling_enabled': False,
+            'capabilities': list(closed_loop_core.MOTOR_CAPABILITIES),
             'online': False,
             'can_interface': getattr(self, 'can_interface', ''),
             'addr': getattr(self, 'addr', 0),
@@ -519,8 +561,12 @@ class ZdtEmm42:
         if self.pid_timer is not None:
             self.reactor.update_timer(self.pid_timer, self.reactor.NEVER)
         self._close_csv()
-        self._unregister_fd()
-        if self.sock is not None:
+        if getattr(self, 'transport_endpoint', None) is not None:
+            self.transport_endpoint.release(self)
+        else:
+            self._unregister_fd()
+        if self.sock is not None and getattr(
+                self, 'transport_endpoint', None) is None:
             try:
                 self.sock.close()
             except Exception:
@@ -536,6 +582,9 @@ class ZdtEmm42:
         self.last['error_mm'] = None
 
     def _open_socket(self):
+        if getattr(self, 'transport_endpoint', None) is not None:
+            self.transport_endpoint.acquire(self)
+            return
         if self.sock is not None:
             return
         s = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
@@ -574,6 +623,8 @@ class ZdtEmm42:
     def _poll_timer(self, eventtime):
         if not self.enabled:
             return self.reactor.NEVER
+        if getattr(self, 'sync_request', None) is not None:
+            return eventtime + self.poll_interval
         try:
             if self.pending_cmd is not None:
                 # The previous command was never answered. Count it as a timeout
@@ -597,6 +648,8 @@ class ZdtEmm42:
     def _error_poll_timer(self, eventtime):
         if not self.enabled:
             return self.reactor.NEVER
+        if getattr(self, 'sync_request', None) is not None:
+            return eventtime + self.error_poll_interval
         try:
             if self.pending_error_cmd is not None:
                 if eventtime - self.pending_error_since >= self.query_timeout:
@@ -616,6 +669,8 @@ class ZdtEmm42:
     def _pid_poll_timer(self, eventtime):
         if not self.enabled:
             return self.reactor.NEVER
+        if getattr(self, 'sync_request', None) is not None:
+            return eventtime + 0.25
         if self.pending_pid:
             if eventtime - self.pending_pid_since < self.query_timeout:
                 return self.pending_pid_since + self.query_timeout
@@ -790,6 +845,14 @@ class ZdtEmm42:
         return data
 
     def _send_payload(self, payload, packet_no=0):
+        endpoint = getattr(self, 'transport_endpoint', None)
+        if endpoint is not None:
+            endpoint.acquire(self)
+            arb_id = endpoint.send(self.addr, packet_no, payload)
+            self.last['last_tx_id'] = "0x%08X" % arb_id
+            self.last['last_tx_payload'] = ' '.join(
+                '%02X' % b for b in payload)
+            return
         if self.sock is None:
             self._open_socket()
         if len(payload) > 8:
@@ -860,6 +923,15 @@ class ZdtEmm42:
                 self._process_frame(arb_id, data, eventtime)
         except Exception:
             logging.exception("zdt_emm42 %s: rx handler failed", self.name)
+
+    def _handle_transport_frame(self, arb_id, payload, eventtime):
+        try:
+            if self._process_sync_frame(arb_id, payload, eventtime):
+                return
+            self._process_frame(arb_id, payload, eventtime)
+        except Exception:
+            logging.exception(
+                'closed_loop_motor %s: transport frame failed', self.name)
 
     def _find_pending_response(self, raw):
         # There can be one general telemetry request and one position-error
@@ -1007,12 +1079,115 @@ class ZdtEmm42:
             return data[2] == self._checksum(data[:2])
         return False
 
+    def _process_sync_frame(self, arb_id, raw, eventtime):
+        request = getattr(self, 'sync_request', None)
+        if request is None or (arb_id >> 8) != self.addr:
+            return False
+        cmd = request['cmd']
+        if request.get('long_response'):
+            data = self._normalize_long_packet(raw, cmd)
+            if len(data) >= 3 and data[0] == 0x00 and data[1] == 0xEE:
+                request['error'] = (
+                    'device returned EE for cmd 0x%02X' % cmd)
+                request['done'] = True
+                return True
+            if not data or data[0] != cmd:
+                return False
+            packet_no = arb_id & 0xFF
+            if packet_no != request['packet_no']:
+                request['error'] = (
+                    'out-of-order long response packet for cmd 0x%02X: '
+                    'expected %d got %d' %
+                    (cmd, request['packet_no'], packet_no))
+                request['done'] = True
+                return True
+            request['tail'].extend(data[1:])
+            request['packet_no'] += 1
+            expected_tail = request['response_len'] - 2
+            if len(request['tail']) < expected_tail:
+                return True
+            if len(request['tail']) != expected_tail:
+                request['error'] = (
+                    'invalid long response length for cmd 0x%02X' % cmd)
+                request['done'] = True
+                return True
+            normalized = bytearray([self.addr, cmd]) + request['tail']
+            if not self._verify_checksum(normalized):
+                request['error'] = (
+                    'bad check byte for long cmd 0x%02X' % cmd)
+            else:
+                request['result'] = normalized
+                self.last['last_rx_id'] = "0x%08X" % arb_id
+                self.last['last_rx_payload'] = ' '.join(
+                    '%02X' % b for b in raw)
+            request['done'] = True
+            return True
+        if self._is_request_like_payload(raw):
+            return True
+        data = self._normalize_response(raw, cmd)
+        if len(data) < 4:
+            return False
+        if data[0] == self.addr and data[1] == 0x00 and data[2] == 0xEE:
+            request['error'] = 'device returned EE for cmd 0x%02X' % cmd
+            request['done'] = True
+            return True
+        if data[0] != self.addr or data[1] != cmd:
+            return False
+        if not self._verify_checksum(data):
+            request['error'] = 'bad check byte for cmd 0x%02X' % cmd
+        else:
+            request['result'] = bytearray(data)
+            self.last['last_rx_id'] = "0x%08X" % arb_id
+            self.last['last_rx_payload'] = ' '.join(
+                '%02X' % b for b in raw)
+        request['done'] = True
+        return True
+
+    def _transport_query_sync(self, cmd, extra, timeout, send_long=False,
+                              response_len=None):
+        self._cancel_pid_request()
+        self.pending_cmd = None
+        self.pending_error_cmd = None
+        request = {
+            'cmd': cmd & 0xFF,
+            'done': False,
+            'error': None,
+            'result': None,
+            'long_response': response_len is not None,
+            'response_len': response_len,
+            'packet_no': 0,
+            'tail': bytearray(),
+        }
+        self.sync_request = request
+        try:
+            if send_long:
+                self._send_long_command(cmd, extra)
+            else:
+                self._send_command(cmd, extra)
+            deadline = self.reactor.monotonic() + timeout
+            while not request['done']:
+                now = self.reactor.monotonic()
+                if now >= deadline:
+                    request['error'] = (
+                        'timeout waiting for response to cmd 0x%02X' % cmd)
+                    break
+                self.reactor.pause(min(deadline, now + 0.001))
+            if request['error']:
+                self.last_error = request['error']
+                return None
+            return request['result']
+        finally:
+            self.sync_request = None
+
     def _query_sync(self, cmd, extra=b'', timeout=None, send_long=False):
         # Synchronous request/response for interactive g-code commands only. Blocking
         # briefly here is acceptable because it runs from a g-code handler, not the
         # periodic poll. The periodic path is fully asynchronous (_handle_rx).
         if timeout is None:
             timeout = self.query_timeout
+        if getattr(self, 'transport_endpoint', None) is not None:
+            return self._transport_query_sync(
+                cmd, extra, timeout, send_long=send_long)
         self._cancel_pid_request()
         if self.sock is None:
             self._open_socket()
@@ -1072,6 +1247,9 @@ class ZdtEmm42:
             raise ValueError('response_len is required for a long response')
         if timeout is None:
             timeout = self.query_timeout
+        if getattr(self, 'transport_endpoint', None) is not None:
+            return self._transport_query_sync(
+                cmd, extra, timeout, response_len=response_len)
         self._cancel_pid_request()
         if self.sock is None:
             self._open_socket()
@@ -1233,6 +1411,140 @@ class ZdtEmm42:
 
     def _counts_to_mm(self, counts):
         return counts * self.rotation_distance / 65536.0
+
+    # Public capability surface used by generic group strategies.
+    def closed_loop_identity(self):
+        return (self.vendor, self.model, self.transport_type)
+
+    def closed_loop_name(self):
+        return self.name
+
+    def closed_loop_object_name(self):
+        return closed_loop_core.motor_object_name(self.name)
+
+    def closed_loop_capabilities(self):
+        return tuple(closed_loop_core.MOTOR_CAPABILITIES)
+
+    def transport_address(self):
+        return (self.transport_type, self.can_interface, self.addr)
+
+    def query_status_command(self, cmd):
+        data = self._query_sync(cmd, timeout=self.query_timeout)
+        if data is None:
+            return False
+        return self._record_valid_response(
+            cmd, data, self.reactor.monotonic())
+
+    def refresh_position_error_status(self):
+        return self.query_status_command(CMD_POS_ERROR)
+
+    def refresh_motor_state(self):
+        if not self.query_status_command(CMD_MOTOR_FLAGS):
+            return None
+        return {
+            'stalled': bool(self.last.get('stalled')),
+            'stall_protect': bool(self.last.get('stall_protect')),
+        }
+
+    def closed_loop_status(self, eventtime):
+        return self.get_status(eventtime)
+
+    def closed_loop_last_error(self):
+        return self.last_error
+
+    def closed_loop_autotune_active(self):
+        return self.autotune_active
+
+    def read_position_pid(self):
+        return self._read_pid()
+
+    def write_position_pid(self, pid, store=0, verify=True):
+        return self._write_pid(pid, store=store, verify=verify)
+
+    def begin_position_capture(self, max_error_deg):
+        self._begin_autotune_capture(max_error_deg)
+
+    def set_position_capture_phase(self, phase):
+        self.autotune_capture_phase = str(phase)
+
+    def end_position_capture(self):
+        samples = [dict(value) for value in self.autotune_capture_samples]
+        self._end_autotune_capture()
+        return samples
+
+    def consume_position_capture_violation(self):
+        violation = self.autotune_safety_violation
+        self.autotune_safety_violation = None
+        return violation
+
+    def corexy_test_route(self, origin, distance, validation=False,
+                          profile='long'):
+        return self._corexy_route(
+            origin, distance, validation=validation, profile=profile)
+
+    def prepare_group_capture(self, sample_interval, history_seconds):
+        state = {
+            'polling_enabled': self.enabled,
+            'error_poll_interval': self.error_poll_interval,
+            'history_maxlen': self.error_history.maxlen,
+        }
+        self.autotune_active = True
+        self.enabled = True
+        self.pending_cmd = None
+        self.pending_error_cmd = None
+        self._cancel_pid_request()
+        self.error_poll_interval = sample_interval
+        self._resize_error_history(max(
+            2, int(math.ceil(history_seconds / sample_interval)) + 2))
+        for timer in (self.timer, self.error_timer, self.pid_timer):
+            if timer is not None:
+                self.reactor.update_timer(timer, self.reactor.NEVER)
+        return state
+
+    def restore_group_capture(self, state):
+        if self.autotune_capture_active:
+            self._end_autotune_capture()
+        self.error_poll_interval = state['error_poll_interval']
+        self._prune_error_history(self.reactor.monotonic())
+        self._resize_error_history(state['history_maxlen'])
+        self.autotune_active = False
+        self.autotune_abort = False
+        self.enabled = state['polling_enabled']
+        if self.enabled:
+            if self.timer is not None:
+                self.reactor.update_timer(self.timer, self.reactor.NOW)
+            if self.error_timer is not None:
+                self.reactor.update_timer(
+                    self.error_timer, self.reactor.NOW)
+            if self.pid_timer is not None:
+                self.reactor.update_timer(
+                    self.pid_timer, self.reactor.monotonic() + 0.25)
+        else:
+            self._set_polling_enabled(False)
+
+    def position_pid_bounds(self):
+        return self.autotune_pid_min, self.autotune_pid_max
+
+    def position_pid_steps(self):
+        return (
+            self.autotune_kp_step,
+            self.autotune_ki_step,
+            self.autotune_kd_step,
+        )
+
+    def request_autotune_cancel(self):
+        self.autotune_abort = True
+
+    def latest_position_error_sample(self):
+        if not self.error_history:
+            return None
+        return dict(self.error_history[-1])
+
+    def validate_group_autotune_configuration(self):
+        if self.can_payload_includes_addr:
+            raise ValueError(
+                'ZDT EMM42 over CAN requires '
+                'can_payload_includes_addr=False for autotune')
 
     def _read_pid(self, timeout=None):
         data = self._query_long_sync(
@@ -1470,23 +1782,28 @@ class ZdtEmm42:
     def _check_autotune_preconditions(self, gcmd, axis):
         if self.can_payload_includes_addr:
             raise gcmd.error(
-                "ZDT_EMM_AUTOTUNE requires can_payload_includes_addr=False; "
+                "CLOSED_LOOP_MOTOR_AUTOTUNE requires "
+                "can_payload_includes_addr=False; "
                 "the CAN address belongs in the extended CAN ID")
         toolhead = self.printer.lookup_object('toolhead', None)
         if toolhead is None:
-            raise gcmd.error('ZDT_EMM_AUTOTUNE requires the Klipper toolhead object')
+            raise gcmd.error(
+                'CLOSED_LOOP_MOTOR_AUTOTUNE requires the Klipper '
+                'toolhead object')
         print_stats = self.printer.lookup_object('print_stats', None)
         if print_stats is not None:
             state = str(print_stats.get_status(self.reactor.monotonic()).get(
                 'state', '')).lower()
             if state not in ('standby', 'complete', 'cancelled', 'error'):
                 raise gcmd.error(
-                    'ZDT_EMM_AUTOTUNE requires an idle printer (state=%s)' % state)
+                    'CLOSED_LOOP_MOTOR_AUTOTUNE requires an idle printer '
+                    '(state=%s)' % state)
         toolhead_status = toolhead.get_status(self.reactor.monotonic())
         if axis in ('x', 'y', 'z') and axis not in str(
                 toolhead_status.get('homed_axes', '')).lower():
             raise gcmd.error(
-                'axis %s must be homed before ZDT_EMM_AUTOTUNE' % axis.upper())
+                'axis %s must be homed before '
+                'CLOSED_LOOP_MOTOR_AUTOTUNE' % axis.upper())
         # Do not append the calibration moves behind an already queued manual
         # move.  The print-state check above covers the normal case; this wait
         # also handles a just-finished jog or macro.
@@ -1495,19 +1812,23 @@ class ZdtEmm42:
         if data is None or not self._record_valid_response(
                 CMD_POS_ERROR, data, self.reactor.monotonic()):
             raise gcmd.error(
-                "ZDT_EMM_AUTOTUNE CAN preflight failed: %s" % self.last_error)
+                "CLOSED_LOOP_MOTOR_AUTOTUNE CAN preflight failed: %s" %
+                self.last_error)
         if not self.get_status(self.reactor.monotonic()).get('online'):
             raise gcmd.error(
-                "ZDT_EMM_AUTOTUNE CAN device is offline: %s" % self.last_error)
+                "CLOSED_LOOP_MOTOR_AUTOTUNE CAN device is offline: %s" %
+                self.last_error)
         pid = self._read_pid()
         if pid is None:
             raise gcmd.error(
-                "ZDT_EMM_AUTOTUNE PID read failed: %s" % self.last_error)
+                "CLOSED_LOOP_MOTOR_AUTOTUNE PID read failed: %s" %
+                self.last_error)
         # A same-value STORE=0 write proves the long-request framing and the
         # device's run-time write path before any exploratory candidate is used.
         if not self._write_pid(pid, store=0, verify=True):
             raise gcmd.error(
-                "ZDT_EMM_AUTOTUNE PID temporary-write validation failed: %s" %
+                "CLOSED_LOOP_MOTOR_AUTOTUNE PID temporary-write "
+                "validation failed: %s" %
                 self.last_error)
         return toolhead, pid
 
@@ -1683,7 +2004,8 @@ class ZdtEmm42:
 
     def _check_autotune_runtime_safety(self):
         if self.autotune_abort:
-            raise RuntimeError('ZDT_EMM_AUTOTUNE cancellation requested')
+            raise RuntimeError(
+                'CLOSED_LOOP_MOTOR_AUTOTUNE cancellation requested')
         violation = self.autotune_safety_violation
         if violation:
             if violation.startswith('position error'):
@@ -2216,7 +2538,8 @@ class ZdtEmm42:
 
     def cmd_AUTOTUNE(self, gcmd):
         if self.autotune_active:
-            raise gcmd.error('ZDT_EMM_AUTOTUNE is already running')
+            raise gcmd.error(
+                'CLOSED_LOOP_MOTOR_AUTOTUNE is already running')
         profile = gcmd.get('PROFILE', 'AXIS').strip().upper()
         if profile == 'COREXY_PRINT':
             return self._cmd_AUTOTUNE_COREXY(gcmd)
@@ -2231,7 +2554,8 @@ class ZdtEmm42:
         iterations = gcmd.get_int('ITERATIONS', minval=1, maxval=1000)
         if gcmd.get_int('CONFIRM', 0, minval=0, maxval=1) != 1:
             raise gcmd.error(
-                'ZDT_EMM_AUTOTUNE moves the selected axis; pass CONFIRM=1')
+                'CLOSED_LOOP_MOTOR_AUTOTUNE moves the selected axis; '
+                'pass CONFIRM=1')
         settle_time = gcmd.get_float(
             'SETTLE', self.autotune_settle_time, minval=0.0, maxval=30.0)
         steps = [
@@ -2264,7 +2588,8 @@ class ZdtEmm42:
             baseline = self._score_error_samples(baseline_samples)
             if baseline is None:
                 raise gcmd.error(
-                    'ZDT_EMM_AUTOTUNE baseline has too few valid error samples')
+                    'CLOSED_LOOP_MOTOR_AUTOTUNE baseline has too few '
+                    'valid error samples')
             best = baseline
             directions = [1, 1, 1]
             failed = [0, 0, 0]
@@ -2276,7 +2601,8 @@ class ZdtEmm42:
 
             for iteration in range(1, iterations + 1):
                 if self.autotune_abort:
-                    raise gcmd.error('ZDT_EMM_AUTOTUNE aborted')
+                    raise gcmd.error(
+                        'CLOSED_LOOP_MOTOR_AUTOTUNE aborted')
                 parameter = (iteration - 1) % 3
                 candidate, directions[parameter] = self._next_pid_candidate(
                     current, parameter, directions[parameter], steps[parameter])
@@ -2363,7 +2689,8 @@ class ZdtEmm42:
                         'zdt_emm42 %s: failed to restore original PID', self.name)
             logging.exception(
                 'zdt_emm42 %s: unexpected axis autotune failure', self.name)
-            raise gcmd.error('ZDT_EMM_AUTOTUNE failed safely: %s' % exc)
+            raise gcmd.error(
+                'CLOSED_LOOP_MOTOR_AUTOTUNE failed safely: %s' % exc)
         finally:
             if saved_accel is not None:
                 try:
@@ -2454,6 +2781,32 @@ class ZdtEmm42:
             self.enabled and status.get('online') is True and
             self.last_error_update_time is not None and
             eventtime - self.last_error_update_time <= self.offline_timeout)
+        status['connection_state'] = (
+            'online' if status['online'] else
+            'error' if str(self.last_error).startswith('CAN open failed') else
+            'offline' if self.enabled else 'unknown')
+        status['polling_enabled'] = bool(self.enabled)
+        status['motor_enabled'] = status.get('enabled')
+        status['autotune_active'] = bool(self.autotune_active)
+        status['device_settings'] = dict(status['driver_config'])
+        diagnostics = {
+            'error_count': self.error_count,
+            'last_error': self.last_error,
+            'ignored_frames': getattr(self, 'ignored_frames', 0),
+            'request_like_frames': getattr(
+                self, 'request_like_frames', 0),
+            'standard_frames': getattr(self, 'standard_frames', 0),
+            'other_frames': getattr(self, 'ext_other_frames', 0),
+            'error_frames': getattr(self, 'error_frames', 0),
+            'last_tx_id': status.get('last_tx_id'),
+            'last_tx_payload': status.get('last_tx_payload'),
+            'last_rx_id': status.get('last_rx_id'),
+            'last_rx_payload': status.get('last_rx_payload'),
+        }
+        endpoint = getattr(self, 'transport_endpoint', None)
+        if endpoint is not None:
+            diagnostics['endpoint'] = endpoint.diagnostics()
+        status['transport_diagnostics'] = diagnostics
         return status
 
     def cmd_STATUS(self, gcmd):
@@ -2516,6 +2869,56 @@ class ZdtEmm42:
     def cmd_SNIFF(self, gcmd):
         seconds = gcmd.get_float('SECONDS', 2.0, above=0.0, maxval=10.0)
         max_frames = gcmd.get_int('MAX', 80, minval=1, maxval=500)
+        endpoint = getattr(self, 'transport_endpoint', None)
+        if endpoint is not None:
+            captured = []
+
+            def observe(extended, frame_id, payload, eventtime):
+                if len(captured) >= max_frames:
+                    return
+                if not self._sniff_accepts_frame(extended, frame_id):
+                    return
+                captured.append("%s 0x%0*X [%d] %s" % (
+                    'EXT' if extended else 'STD', 8 if extended else 3,
+                    frame_id, len(payload),
+                    ' '.join('%02X' % b for b in payload)))
+
+            already_acquired = self in endpoint.owners
+            endpoint.acquire(self)
+            observer_added = False
+            try:
+                endpoint.add_observer(
+                    observe, include_standard=self.can_filter == 'off')
+                observer_added = True
+                end = self.reactor.monotonic() + seconds
+                index = 0
+                next_send = self.reactor.monotonic()
+                while (self.reactor.monotonic() < end and
+                       len(captured) < max_frames):
+                    now = self.reactor.monotonic()
+                    if now >= next_send:
+                        try:
+                            self._send_command(
+                                READ_COMMANDS[index % len(READ_COMMANDS)])
+                        except Exception:
+                            pass
+                        index += 1
+                        next_send = now + 0.05
+                    self.reactor.pause(min(end, now + 0.02))
+            finally:
+                if observer_added:
+                    endpoint.remove_observer(observe)
+                if not already_acquired:
+                    endpoint.release(self)
+            if not captured:
+                gcmd.respond_info(
+                    "Closed-loop motor '%s': no CAN frames captured in "
+                    "%.1fs" % (self.name, seconds))
+            else:
+                gcmd.respond_info(
+                    "Closed-loop motor '%s' captured %d frame(s):\n%s" %
+                    (self.name, len(captured), "\n".join(captured)))
+            return
         if self.sock is None:
             self._open_socket()
         reactor = self.reactor
@@ -2589,8 +2992,8 @@ class ZdtEmm42:
 
 
 def load_config_prefix(config):
-    return ZdtEmm42(config)
+    return closed_loop_core.register_legacy_motor(config)
 
 
 def load_config(config):
-    return ZdtEmm42(config)
+    return closed_loop_core.register_legacy_motor(config)

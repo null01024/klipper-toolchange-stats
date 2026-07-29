@@ -8,9 +8,9 @@ from unittest import mock
 
 EXTRAS_PATH = Path(__file__).resolve().parents[1] / 'klipper' / 'extras'
 sys.path.insert(0, str(EXTRAS_PATH))
-MODULE_PATH = EXTRAS_PATH / 'zdt_emm42_xy_group.py'
+MODULE_PATH = EXTRAS_PATH / 'closed_loop_motor_corexy_group.py'
 SPEC = importlib.util.spec_from_file_location(
-    'zdt_emm42_xy_group_under_test', MODULE_PATH)
+    'closed_loop_motor_corexy_group_under_test', MODULE_PATH)
 XY_GROUP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(XY_GROUP)
 
@@ -38,18 +38,94 @@ class FakeMember:
         self.autotune_pid_max = 100000
         self.autotune_abort = False
         self.writes = []
+        self.capture_phase = ''
+
+    def closed_loop_identity(self):
+        return 'test_vendor', 'test_model', 'can'
+
+    def closed_loop_name(self):
+        return self.name
+
+    def closed_loop_object_name(self):
+        return 'closed_loop_motor ' + self.name
+
+    def closed_loop_capabilities(self):
+        return ('position_error', 'pid_read', 'pid_write',
+                'autotune_group')
+
+    def transport_address(self):
+        return 'can', 'can0', self.addr
 
     def get_status(self, eventtime):
         return dict(self.status)
 
-    def _write_pid(self, pid, store=0, verify=True):
+    def closed_loop_status(self, eventtime):
+        return self.get_status(eventtime)
+
+    def closed_loop_last_error(self):
+        return ''
+
+    def closed_loop_autotune_active(self):
+        return False
+
+    def refresh_position_error_status(self):
+        return True
+
+    def refresh_motor_state(self):
+        return {
+            'stalled': self.status['stalled'],
+            'stall_protect': self.status['stall_protect'],
+        }
+
+    def read_position_pid(self):
+        return (self.status['pid_kp'], self.status['pid_ki'],
+                self.status['pid_kd'])
+
+    def latest_position_error_sample(self):
+        return self.error_history[-1]
+
+    def write_position_pid(self, pid, store=0, verify=True):
         self.writes.append((tuple(pid), store, verify))
         return True
 
+    def position_pid_bounds(self):
+        return self.autotune_pid_min, self.autotune_pid_max
+
+    def position_pid_steps(self):
+        return 5000, 20, 5000
+
+    def begin_position_capture(self, max_error_deg):
+        pass
+
+    def set_position_capture_phase(self, phase):
+        self.capture_phase = phase
+
+    def end_position_capture(self):
+        return []
+
+    def consume_position_capture_violation(self):
+        return None
+
+    def prepare_group_capture(self, sample_interval, history_seconds):
+        return {}
+
+    def restore_group_capture(self, state):
+        pass
+
+    def validate_group_autotune_configuration(self):
+        pass
+
+    def corexy_test_route(self, origin, distance, validation=False,
+                          profile='long'):
+        return []
+
+    def request_autotune_cancel(self):
+        self.autotune_abort = True
+
 
 def make_group():
-    group = XY_GROUP.ZdtEmm42XYGroup.__new__(
-        XY_GROUP.ZdtEmm42XYGroup)
+    group = XY_GROUP.ClosedLoopCoreXYGroup.__new__(
+        XY_GROUP.ClosedLoopCoreXYGroup)
     group.expected_member_count = 2
     group.name = 'xy'
     group.member_names = ['motor_a', 'motor_b']
@@ -240,7 +316,7 @@ class ZdtEmm42XYGroupTest(unittest.TestCase):
     def test_partial_pid_write_can_restore_both_originals(self):
         group = make_group()
         originals = [(62000, 100, 62000), (61000, 90, 61000)]
-        group.members[1]._write_pid = mock.Mock(return_value=False)
+        group.members[1].write_position_pid = mock.Mock(return_value=False)
 
         ok, failed = group._write_pid_set(
             [(63000, 100, 62000), (62000, 90, 61000)],

@@ -1,13 +1,16 @@
 import importlib.util
 import math
 import struct
+import sys
 import unittest
 from collections import deque
 from pathlib import Path
 from unittest import mock
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / 'klipper' / 'extras' / 'zdt_emm42.py'
+EXTRAS_PATH = Path(__file__).resolve().parents[1] / 'klipper' / 'extras'
+sys.path.insert(0, str(EXTRAS_PATH))
+MODULE_PATH = EXTRAS_PATH / 'zdt_emm42.py'
 SPEC = importlib.util.spec_from_file_location('zdt_emm42_under_test', MODULE_PATH)
 ZDT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ZDT)

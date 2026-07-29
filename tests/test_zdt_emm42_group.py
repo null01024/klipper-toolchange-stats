@@ -1,15 +1,17 @@
 import importlib.util
 import math
+import sys
 import unittest
 from collections import deque
 from pathlib import Path
 from unittest import mock
 
 
-MODULE_PATH = (Path(__file__).resolve().parents[1] / 'klipper' / 'extras' /
-               'zdt_emm42_group.py')
+EXTRAS_PATH = Path(__file__).resolve().parents[1] / 'klipper' / 'extras'
+sys.path.insert(0, str(EXTRAS_PATH))
+MODULE_PATH = EXTRAS_PATH / 'closed_loop_motor_three_z_group.py'
 SPEC = importlib.util.spec_from_file_location(
-    'zdt_emm42_group_under_test', MODULE_PATH)
+    'closed_loop_motor_three_z_group_under_test', MODULE_PATH)
 GROUP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GROUP)
 
@@ -37,17 +39,90 @@ class FakeMember:
         self.autotune_pid_max = 100000
         self.autotune_abort = False
         self.writes = []
+        self.capture_phase = ''
+
+    def closed_loop_identity(self):
+        return 'test_vendor', 'test_model', 'can'
+
+    def closed_loop_name(self):
+        return self.name
+
+    def closed_loop_object_name(self):
+        return 'closed_loop_motor ' + self.name
+
+    def closed_loop_capabilities(self):
+        return ('position_error', 'pid_read', 'pid_write',
+                'autotune_group')
+
+    def transport_address(self):
+        return 'can', 'can0', self.addr
 
     def get_status(self, eventtime):
         return dict(self.status)
 
-    def _write_pid(self, pid, store=0, verify=True):
+    def closed_loop_status(self, eventtime):
+        return self.get_status(eventtime)
+
+    def closed_loop_last_error(self):
+        return ''
+
+    def closed_loop_autotune_active(self):
+        return False
+
+    def refresh_position_error_status(self):
+        return True
+
+    def refresh_motor_state(self):
+        return {
+            'stalled': self.status['stalled'],
+            'stall_protect': self.status['stall_protect'],
+        }
+
+    def read_position_pid(self):
+        return (self.status['pid_kp'], self.status['pid_ki'],
+                self.status['pid_kd'])
+
+    def latest_position_error_sample(self):
+        return self.error_history[-1]
+
+    def write_position_pid(self, pid, store=0, verify=True):
         self.writes.append((tuple(pid), store, verify))
         return True
 
+    def position_pid_bounds(self):
+        return self.autotune_pid_min, self.autotune_pid_max
+
+    def position_pid_steps(self):
+        return 5000, 20, 5000
+
+    def begin_position_capture(self, max_error_deg):
+        pass
+
+    def set_position_capture_phase(self, phase):
+        self.capture_phase = phase
+
+    def end_position_capture(self):
+        return []
+
+    def consume_position_capture_violation(self):
+        return None
+
+    def prepare_group_capture(self, sample_interval, history_seconds):
+        return {}
+
+    def restore_group_capture(self, state):
+        pass
+
+    def validate_group_autotune_configuration(self):
+        pass
+
+    def request_autotune_cancel(self):
+        self.autotune_abort = True
+
 
 def make_group():
-    group = GROUP.ZdtEmm42Group.__new__(GROUP.ZdtEmm42Group)
+    group = GROUP.ClosedLoopThreeZGroup.__new__(
+        GROUP.ClosedLoopThreeZGroup)
     group.name = 'z'
     group.member_names = ['z_left', 'z_right', 'z_rear']
     group.members = [
@@ -150,6 +225,39 @@ class ZdtEmm42GroupTest(unittest.TestCase):
 
         self.assertEqual(reasons, [{'code': 'offline', 'member': 'z_right'}])
         self.assertFalse(hasattr(group, 'toolhead'))
+
+    def test_group_history_accepts_adapters_without_linear_error(self):
+        group = make_group()
+        for member in group.members:
+            member.status.pop('error_mm')
+            member.error_history[-1].pop('error_mm')
+
+        group._collect_sample(10.02)
+
+        self.assertEqual(len(group.history), 1)
+        self.assertIsNone(group.history[0]['max_abs_error_mm'])
+        self.assertIsNone(group.history[0]['spread_mm'])
+        self.assertTrue(all(
+            value['error_mm'] is None
+            for value in group.history[0]['members']))
+
+    def test_capture_preparation_rolls_back_partial_member_state(self):
+        group = make_group()
+        first = group.members[0]
+        second = group.members[1]
+        third = group.members[2]
+        first.prepare_group_capture = mock.Mock(return_value={'enabled': True})
+        first.restore_group_capture = mock.Mock()
+        second.prepare_group_capture = mock.Mock(
+            side_effect=RuntimeError('prepare failed'))
+        third.prepare_group_capture = mock.Mock()
+
+        with self.assertRaisesRegex(RuntimeError, 'prepare failed'):
+            group._prepare_member_capture()
+
+        first.restore_group_capture.assert_called_once_with({'enabled': True})
+        third.prepare_group_capture.assert_not_called()
+        self.assertFalse(group.monitor_suspended)
 
     def test_group_score_weights_members_and_spread(self):
         group = make_group()
@@ -279,7 +387,7 @@ class ZdtEmm42GroupTest(unittest.TestCase):
     def test_partial_pid_set_failure_can_restore_all_originals(self):
         group = make_group()
         originals = [(62000, 100, 62000)] * 3
-        group.members[1]._write_pid = lambda *args, **kwargs: False
+        group.members[1].write_position_pid = lambda *args, **kwargs: False
 
         ok, failed = group._write_pid_set(
             [(63000, 100, 62000)] * 3, store=1, verify=True)
