@@ -171,20 +171,19 @@ function ask_frontend_choice {
 请选择是否安装/更新配套前端：
   0. 不安装/更新前端
   1. Mainsail
-  2. Fluidd（维护可能不及时）
-请输入 0,1,2 [0]: 
+请输入 0,1 [0]: 
 EOF
         read_answer answer
         if [ -z "${answer}" ]; then
             answer=0
         fi
         case "${answer}" in
-            0|1|2)
+            0|1)
                 FRONTEND_CHOICE="${answer}"
                 break
                 ;;
             *)
-                echo "请输入 0..2 之间的数字。"
+                echo "请输入 0..1 之间的数字。"
                 ;;
         esac
     done
@@ -202,11 +201,6 @@ function resolve_frontend_paths {
             FRONTEND_NAME="Mainsail"
             FRONTEND_SOURCE_PATH="${INSTALL_PATH}/mainsail"
             FRONTEND_TARGET_PATH="${HOME}/mainsail"
-            ;;
-        2)
-            FRONTEND_NAME="Fluidd"
-            FRONTEND_SOURCE_PATH="${INSTALL_PATH}/fluidd"
-            FRONTEND_TARGET_PATH="${HOME}/fluidd"
             ;;
         *)
             die "未知前端选择: ${FRONTEND_CHOICE}"
