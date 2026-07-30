@@ -226,14 +226,22 @@ class ClosedLoopThreeZGroup:
     def _member_snapshot(self, member, status):
         vendor, model, transport = member.closed_loop_identity()
         _, interface, address = member.transport_address()
+        endpoint = dict(status.get('endpoint') or {})
+        position_pid = dict(status.get('position_pid') or {})
+        topology = endpoint.get('topology')
+        if topology is None:
+            topology = ('multidrop' if transport in ('can', 'rs485')
+                        else 'point_to_point')
         return {
             'name': member.closed_loop_name(),
             'object': member.closed_loop_object_name(),
-            'address': address,
-            'vendor': vendor,
-            'model': model,
-            'transport': transport,
-            'interface': interface,
+            'identity': {'vendor': vendor, 'model': model},
+            'endpoint': {
+                'transport': endpoint.get('transport', transport),
+                'interface': endpoint.get('interface', interface),
+                'address': endpoint.get('address', address),
+                'topology': topology,
+            },
             'connection_state': status.get(
                 'connection_state',
                 'online' if status.get('online') is True else 'offline'),
@@ -241,9 +249,13 @@ class ClosedLoopThreeZGroup:
                        status.get('online') is True),
             'error_deg': status.get('error_deg'),
             'error_mm': status.get('error_mm'),
-            'pid_kp': status.get('pid_kp'),
-            'pid_ki': status.get('pid_ki'),
-            'pid_kd': status.get('pid_kd'),
+            'position_pid': {
+                'revision': int(position_pid.get('revision') or 0),
+                'kp': position_pid.get('kp'),
+                'ki': position_pid.get('ki'),
+                'kd': position_pid.get('kd'),
+                'error': str(position_pid.get('error') or ''),
+            },
             'stalled': status.get('stalled'),
             'stall_protect': status.get('stall_protect'),
         }
@@ -382,7 +394,7 @@ class ClosedLoopThreeZGroup:
                 'time': max(float(value['time']) for value in aligned),
                 'members': [{
                     'name': snapshot['name'],
-                    'address': snapshot['address'],
+                    'address': snapshot['endpoint']['address'],
                     'error_deg': value.get('error_deg'),
                     'error_mm': value.get('error_mm'),
                 } for snapshot, value in zip(snapshots, aligned)],
@@ -440,12 +452,14 @@ class ClosedLoopThreeZGroup:
                 self.max_error_deg, self.max_spread_deg),
         ]
         for member in status['members']:
+            position_pid = member.get('position_pid') or {}
+            endpoint = member.get('endpoint') or {}
             lines.append(
                 '%s address=%s online=%s error=%s deg PID=%s/%s/%s' % (
-                    member['name'], member['address'], member['online'],
+                    member['name'], endpoint.get('address'), member['online'],
                     self._fmt(member.get('error_deg')),
-                    member.get('pid_kp'), member.get('pid_ki'),
-                    member.get('pid_kd')))
+                    position_pid.get('kp'), position_pid.get('ki'),
+                    position_pid.get('kd')))
         if status['warning_reasons']:
             lines.append('warnings=%s' % status['warning_reasons'])
         gcmd.respond_info('\n'.join(lines))

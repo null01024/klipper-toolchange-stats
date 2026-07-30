@@ -57,9 +57,11 @@ import time
 try:
     from . import closed_loop_motor_core as closed_loop_core
     from . import closed_loop_motor_transport as closed_loop_transport
+    from . import closed_loop_motor_zdt_emm42_v5 as zdt_protocol
 except ImportError:
     import closed_loop_motor_core as closed_loop_core
     import closed_loop_motor_transport as closed_loop_transport
+    import closed_loop_motor_zdt_emm42_v5 as zdt_protocol
 
 CAN_EFF_FLAG = 0x80000000
 CAN_RTR_FLAG = 0x40000000
@@ -69,61 +71,39 @@ CAN_SFF_MASK = 0x000007FF
 CAN_FRAME_FMT = "=IB3x8s"
 CAN_FRAME_SIZE = struct.calcsize(CAN_FRAME_FMT)
 
-# Common ZDT read commands used here.
-CMD_READ_PID = 0x21          # response is >8 bytes and uses CAN long-response framing
-CMD_WRITE_PID = 0x4A         # long request, short response
-CMD_READ_CONFIG = 0x42       # 33-byte driver configuration response
-CMD_WRITE_CONFIG = 0x48      # long request, short response
-CMD_VOLTAGE = 0x24           # addr 24 hi lo 6B
-CMD_CURRENT = 0x27           # addr 27 hi lo 6B
-CMD_ENCODER = 0x31           # addr 31 hi lo 6B
-CMD_INPUT_PULSES = 0x32      # addr 32 sign u32 6B
-CMD_TARGET_POS = 0x33        # addr 33 sign u32 6B
-CMD_REALTIME_TARGET = 0x34   # addr 34 sign u32 6B (realtime setpoint / open-loop realtime pos)
-CMD_RPM = 0x35               # addr 35 sign u16 6B
-CMD_REAL_POS = 0x36          # addr 36 sign u32 6B
-CMD_POS_ERROR = 0x37         # addr 37 sign u32 6B
-CMD_MOTOR_FLAGS = 0x3A       # addr 3A flags 6B
-CMD_HOME_FLAGS = 0x3B        # addr 3B flags 6B
+# Device commands live in the transport-neutral ZDT profile.
+CMD_READ_PID = zdt_protocol.CMD_READ_PID
+CMD_WRITE_PID = zdt_protocol.CMD_WRITE_PID
+CMD_READ_CONFIG = zdt_protocol.CMD_READ_CONFIG
+CMD_WRITE_CONFIG = zdt_protocol.CMD_WRITE_CONFIG
+CMD_VOLTAGE = zdt_protocol.CMD_VOLTAGE
+CMD_CURRENT = zdt_protocol.CMD_CURRENT
+CMD_ENCODER = zdt_protocol.CMD_ENCODER
+CMD_INPUT_PULSES = zdt_protocol.CMD_INPUT_PULSES
+CMD_TARGET_POS = zdt_protocol.CMD_TARGET_POS
+CMD_REALTIME_TARGET = zdt_protocol.CMD_REALTIME_TARGET
+CMD_RPM = zdt_protocol.CMD_RPM
+CMD_REAL_POS = zdt_protocol.CMD_REAL_POS
+CMD_POS_ERROR = zdt_protocol.CMD_POS_ERROR
+CMD_MOTOR_FLAGS = zdt_protocol.CMD_MOTOR_FLAGS
+CMD_HOME_FLAGS = zdt_protocol.CMD_HOME_FLAGS
 
 ERROR_HISTORY_SECONDS = 10.0
 AUTOTUNE_SAMPLE_INTERVAL = 0.02
 AUTOTUNE_MAX_SAMPLES = 100000
-PID_RESPONSE_LEN = 15        # address + command + KP[4] + KI[4] + KD[4] + check
+PID_RESPONSE_LEN = zdt_protocol.PID_RESPONSE_LEN
 PID_WRITE_SUBCOMMAND = 0xC3
-CONFIG_RESPONSE_LEN = 33
+CONFIG_RESPONSE_LEN = zdt_protocol.CONFIG_RESPONSE_LEN
 CONFIG_READ_SUBCOMMAND = 0x6C
 CONFIG_WRITE_SUBCOMMAND = 0xD1
-CONFIG_DATA_LEN = 28
-PID_MIN_VALUE = 0
-PID_MAX_VALUE = 0xFFFFFFFF
+CONFIG_DATA_LEN = zdt_protocol.CONFIG_DATA_LEN
+PID_MIN_VALUE = zdt_protocol.PID_MIN_VALUE
+PID_MAX_VALUE = zdt_protocol.PID_MAX_VALUE
 
 # Offsets are relative to the 28-byte CONFIG area in the 0x42 response.
 # Communication and display-only fields are parsed but never exposed to the
 # write command, so a read-modify-write preserves them byte-for-byte.
-DRIVER_CONFIG_LAYOUT = {
-    'motor_type': (0, 1),
-    'pulse_mode': (1, 1),
-    'serial_mode': (2, 1),
-    'en_level': (3, 1),
-    'dir': (4, 1),
-    'microsteps': (5, 1),
-    'interpolation': (6, 1),
-    'auto_screen_off': (7, 1),
-    'open_loop_current_ma': (8, 2),
-    'stall_max_current_ma': (10, 2),
-    'max_output_mv': (12, 2),
-    'serial_baud_index': (14, 1),
-    'can_baud_index': (15, 1),
-    'device_address': (16, 1),
-    'checksum_index': (17, 1),
-    'response_mode': (18, 1),
-    'stall_protection': (19, 1),
-    'stall_rpm': (20, 2),
-    'stall_current_ma': (22, 2),
-    'stall_time_ms': (24, 2),
-    'position_window_tenths': (26, 2),
-}
+DRIVER_CONFIG_LAYOUT = zdt_protocol.DRIVER_CONFIG_LAYOUT
 
 WRITABLE_CONFIG_PARAMS = {
     'MOTOR_TYPE': ('motor_type', 0, 0xFF),
@@ -142,19 +122,7 @@ WRITABLE_CONFIG_PARAMS = {
     'POSITION_WINDOW': ('position_window_tenths', 0, 65535),
 }
 
-READ_COMMANDS = [
-    CMD_VOLTAGE,
-    CMD_CURRENT,
-    CMD_ENCODER,
-    CMD_INPUT_PULSES,
-    CMD_TARGET_POS,
-    CMD_REALTIME_TARGET,
-    CMD_RPM,
-    CMD_REAL_POS,
-    CMD_POS_ERROR,
-    CMD_MOTOR_FLAGS,
-    CMD_HOME_FLAGS,
-]
+READ_COMMANDS = list(zdt_protocol.READ_COMMANDS)
 
 # Position error is sampled by its own timer.  Keep it in READ_COMMANDS so the
 # diagnostic sniffer still exercises the complete set of read commands, but do
@@ -166,67 +134,16 @@ class AutotuneCandidateRejected(Exception):
     """A PID candidate violated a recoverable tuning constraint."""
 
 
-def _u16(data, index):
-    return (data[index] << 8) | data[index + 1]
-
-
-def _u32(data, index):
-    return ((data[index] << 24) | (data[index + 1] << 16) |
-            (data[index + 2] << 8) | data[index + 3])
-
-
 def _pack_u32(value):
-    value = int(value)
-    if value < PID_MIN_VALUE or value > PID_MAX_VALUE:
-        raise ValueError('PID value must be in the range 0..0xFFFFFFFF')
-    return struct.pack('>I', value)
+    return zdt_protocol.pack_u32(value)
 
 
 def _parse_driver_config(data):
-    data = bytearray(data)
-    if (len(data) != CONFIG_RESPONSE_LEN or data[1] != CMD_READ_CONFIG or
-            data[2] != CONFIG_RESPONSE_LEN or data[3] != 0x15):
-        raise ValueError('invalid 0x42 driver configuration response')
-    raw = bytearray(data[4:-1])
-    if len(raw) != CONFIG_DATA_LEN:
-        raise ValueError('invalid driver configuration payload length')
-    values = {}
-    for name, (offset, size) in DRIVER_CONFIG_LAYOUT.items():
-        if size == 1:
-            value = raw[offset]
-        else:
-            value = _u16(raw, offset)
-        if name == 'microsteps' and value == 0:
-            value = 256
-        values[name] = value
-    return values, raw
+    return zdt_protocol.parse_driver_config(data)
 
 
 def _patch_driver_config(raw, updates):
-    raw = bytearray(raw)
-    if len(raw) != CONFIG_DATA_LEN:
-        raise ValueError('driver configuration must contain 28 bytes')
-    for name, value in updates.items():
-        if name not in DRIVER_CONFIG_LAYOUT:
-            raise ValueError("unknown driver configuration field '%s'" % name)
-        offset, size = DRIVER_CONFIG_LAYOUT[name]
-        value = int(value)
-        if name == 'microsteps' and value == 256:
-            value = 0
-        if size == 1:
-            if value < 0 or value > 0xFF:
-                raise ValueError("driver field '%s' must fit one byte" % name)
-            raw[offset] = value
-        else:
-            if value < 0 or value > 0xFFFF:
-                raise ValueError("driver field '%s' must fit two bytes" % name)
-            raw[offset:offset + 2] = struct.pack('>H', value)
-    return raw
-
-
-def _signed_value(sign_byte, raw):
-    # ZDT convention: 0x01 = negative, 0x00 = positive.
-    return -raw if sign_byte == 0x01 else raw
+    return zdt_protocol.patch_driver_config(raw, updates)
 
 
 def _parse_int(value):
@@ -286,6 +203,10 @@ class ZdtEmm42V5Can:
             'can_payload_includes_addr', False)
         self.checksum_mode = self._parse_checksum_mode(config)
         self.can_filter = self._parse_can_filter(config)
+        self.device_protocol = zdt_protocol.ZdtEmm42V5Protocol(
+            self.addr, self.checksum_mode, self.check_byte)
+        self.link_codec = zdt_protocol.ZdtCanLinkCodec(
+            self.device_protocol, self.can_payload_includes_addr)
         self.poll_interval = config.getfloat('poll_interval', 0.10, above=0.0)
         self.error_poll_interval = config.getfloat(
             'error_poll_interval', 0.05, above=0.0)
@@ -345,6 +266,8 @@ class ZdtEmm42V5Can:
         self.pending_pid_since = 0.0
         self.pending_pid_tail = bytearray()
         self.pending_pid_packet = 0
+        self.settings_revision = 0
+        self.pid_revision = 0
         self.error_history = deque(
             maxlen=max(2, int(math.ceil(ERROR_HISTORY_SECONDS /
                                         self.error_poll_interval)) + 2))
@@ -761,6 +684,23 @@ class ZdtEmm42V5Can:
         # ZDT CAN extended ID: ID_Addr left-shifted by 8 bits; low byte is packet number.
         return ((self.addr & 0xFF) << 8) | (packet_no & 0xFF)
 
+    def _protocol_layers(self):
+        protocol = getattr(self, 'device_protocol', None)
+        if (protocol is None or protocol.address != self.addr or
+                protocol.checksum_mode != self.checksum_mode or
+                protocol.check_byte != self.check_byte):
+            protocol = zdt_protocol.ZdtEmm42V5Protocol(
+                self.addr, self.checksum_mode, self.check_byte)
+            self.device_protocol = protocol
+        codec = getattr(self, 'link_codec', None)
+        if (codec is None or codec.protocol is not protocol or
+                codec.payload_includes_address !=
+                self.can_payload_includes_addr):
+            codec = zdt_protocol.ZdtCanLinkCodec(
+                protocol, self.can_payload_includes_addr)
+            self.link_codec = codec
+        return protocol, codec
+
     def _checksum(self, logical_bytes):
         # logical_bytes is the command/response WITHOUT the trailing check byte, in
         # its address-included ("serial-shaped") form. The manual defines XOR/CRC as
@@ -768,44 +708,23 @@ class ZdtEmm42V5Can:
         # NOTE: over CAN the address is carried in the frame id, not the payload, so
         # whether the device folds it into XOR/CRC is not documented. This is only
         # relevant for the (opt-in, unverified) xor/crc8 modes; 0x6B is fixed.
-        if self.checksum_mode == 'xor':
-            c = 0
-            for b in logical_bytes:
-                c ^= b
-            return c & 0xFF
-        if self.checksum_mode == 'crc8':
-            return self._crc8(logical_bytes)
-        return self.check_byte
+        protocol, _ = self._protocol_layers()
+        return protocol.checksum(logical_bytes)
 
     def _crc8(self, data):
         # Standard CRC-8 (poly 0x07, init 0x00). Parameters are a guess: the manual
         # gives no CRC-8 example, so treat crc8 mode as experimental until verified.
-        crc = 0
-        for b in data:
-            crc ^= b
-            for _ in range(8):
-                if crc & 0x80:
-                    crc = ((crc << 1) ^ 0x07) & 0xFF
-                else:
-                    crc = (crc << 1) & 0xFF
-        return crc
+        return zdt_protocol.ZdtEmm42V5Protocol.crc8(data)
 
     def _verify_checksum(self, normalized):
         # normalized is the address-included form: [addr, func, data..., check].
-        if len(normalized) < 2:
-            return False
-        return normalized[-1] == self._checksum(normalized[:-1])
+        protocol, _ = self._protocol_layers()
+        return protocol.verify_checksum(normalized)
 
     def _send_command(self, cmd, extra=b''):
-        logical = bytearray([self.addr & 0xFF, cmd & 0xFF])
-        logical.extend(extra)
-        check = self._checksum(logical)
-        if self.can_payload_includes_addr:
-            payload = bytes(logical) + bytes([check])
-        else:
-            # Address travels in the extended frame id, so drop it from the payload.
-            payload = bytes(logical[1:]) + bytes([check])
-        self._send_payload(payload, 0)
+        _, codec = self._protocol_layers()
+        for packet_no, payload in codec.encode_short(cmd, extra):
+            self._send_payload(payload, packet_no)
 
     def _send_long_command(self, cmd, extra=b''):
         """Send a ZDT long command using the documented CAN packet format.
@@ -814,26 +733,14 @@ class ZdtEmm42V5Can:
         payload carries the command and command data only.  Each CAN packet
         repeats the command byte and carries at most seven continuation bytes.
         """
-        if self.can_payload_includes_addr:
-            raise ValueError(
-                'long CAN commands require can_payload_includes_addr=False')
-        logical = bytearray([self.addr & 0xFF, cmd & 0xFF])
-        logical.extend(extra)
-        tail = bytearray(extra)
-        tail.append(self._checksum(logical))
-        packet_no = 0
-        while tail:
-            chunk = tail[:7]
-            del tail[:7]
-            self._send_payload(bytes([cmd & 0xFF]) + bytes(chunk), packet_no)
-            packet_no += 1
+        _, codec = self._protocol_layers()
+        for packet_no, payload in codec.encode_long(cmd, extra):
+            self._send_payload(payload, packet_no)
 
     def _normalize_long_packet(self, raw, cmd):
         """Return command-only bytes from one CAN response packet."""
-        data = bytearray(raw)
-        if len(data) >= 2 and data[0] == self.addr and data[1] in (cmd, 0x00):
-            return data[1:]
-        return data
+        _, codec = self._protocol_layers()
+        return codec.normalize_long_packet(raw, cmd)
 
     def _send_payload(self, payload, packet_no=0):
         endpoint = getattr(self, 'transport_endpoint', None)
@@ -1308,94 +1215,70 @@ class ZdtEmm42V5Can:
         # 24 5C 6A 6B. Decide using the known function code position (byte 1 is the
         # echoed func code, or 0x00 for an error) rather than a bare "== addr" test,
         # so an address that happens to equal a data byte cannot fool us.
-        data = bytearray(data)
-        if len(data) >= 2 and data[0] == self.addr and (data[1] == cmd or data[1] == 0x00):
-            return data
-        return bytearray([self.addr]) + data
+        _, codec = self._protocol_layers()
+        return codec.normalize_response(data, cmd)
 
     def _parse_response(self, cmd, data):
-        parsed = False
-        if cmd == CMD_READ_CONFIG and len(data) == CONFIG_RESPONSE_LEN:
-            try:
-                values, raw = _parse_driver_config(data)
-            except ValueError:
-                return False
-            self.driver_config_raw = raw
-            self.last['driver_config'] = values
+        try:
+            protocol, _ = self._protocol_layers()
+            decoded = protocol.decode_normalized(data)
+        except zdt_protocol.ProtocolError:
+            return False
+        kind = decoded['kind']
+        if kind == 'settings':
+            self.driver_config_raw = bytearray(decoded['raw'])
+            self.last['driver_config'] = decoded['values']
             self.last['config_last_update_time'] = self.reactor.monotonic()
             self.last['config_error'] = ''
-            parsed = True
-        elif cmd == CMD_WRITE_CONFIG and len(data) >= 4:
-            self.last['config_write_status'] = data[2]
-            parsed = data[2] != 0x00
-        elif cmd == CMD_READ_PID and len(data) >= PID_RESPONSE_LEN:
-            self.last['pid_kp'] = _u32(data, 2)
-            self.last['pid_ki'] = _u32(data, 6)
-            self.last['pid_kd'] = _u32(data, 10)
-            parsed = True
-        elif cmd == CMD_WRITE_PID and len(data) >= 4:
-            self.last['pid_write_status'] = data[2]
-            parsed = data[2] != 0x00
-        elif cmd == CMD_VOLTAGE and len(data) >= 5:
-            self.last['voltage_mv'] = _u16(data, 2)
-            parsed = True
-        elif cmd == CMD_CURRENT and len(data) >= 5:
-            self.last['current_ma'] = _u16(data, 2)
-            parsed = True
-        elif cmd == CMD_ENCODER and len(data) >= 5:
-            self.last['encoder_counts'] = _u16(data, 2)
-            parsed = True
-        elif cmd == CMD_INPUT_PULSES and len(data) >= 8:
-            pulses = _signed_value(data[2], _u32(data, 3))
-            self.last['input_pulses'] = pulses
-            ppr = float(self.microsteps * self.full_steps_per_rotation)
-            self.last['input_pulses_mm'] = pulses * self.rotation_distance / ppr
-            parsed = True
-        elif cmd == CMD_TARGET_POS and len(data) >= 8:
-            counts = _signed_value(data[2], _u32(data, 3))
-            self.last['target_counts'] = counts
-            self.last['target_deg'] = self._counts_to_deg(counts)
-            self.last['target_mm'] = self._counts_to_mm(counts)
-            parsed = True
-        elif cmd == CMD_REALTIME_TARGET and len(data) >= 8:
-            counts = _signed_value(data[2], _u32(data, 3))
-            self.last['realtime_target_counts'] = counts
-            self.last['realtime_target_deg'] = self._counts_to_deg(counts)
-            self.last['realtime_target_mm'] = self._counts_to_mm(counts)
-            parsed = True
-        elif cmd == CMD_RPM and len(data) >= 6:
-            self.last['rpm'] = _signed_value(data[2], _u16(data, 3))
-            parsed = True
-        elif cmd == CMD_REAL_POS and len(data) >= 8:
-            counts = _signed_value(data[2], _u32(data, 3))
-            self.last['actual_counts'] = counts
-            self.last['actual_deg'] = self._counts_to_deg(counts)
-            self.last['actual_mm'] = self._counts_to_mm(counts)
-            parsed = True
-        elif cmd == CMD_POS_ERROR and len(data) >= 8:
-            counts = _signed_value(data[2], _u32(data, 3))
-            self.last['error_counts'] = counts
-            self.last['error_deg'] = self._counts_to_deg(counts)
-            self.last['error_mm'] = self._counts_to_mm(counts)
-            parsed = True
-        elif cmd == CMD_MOTOR_FLAGS and len(data) >= 4:
-            flags = data[2]
+            self.settings_revision = getattr(
+                self, 'settings_revision', 0) + 1
+        elif kind == 'settings_write':
+            self.last['config_write_status'] = decoded['status']
+            if decoded['status'] == 0x00:
+                return False
+        elif kind == 'position_pid':
+            self.last['pid_kp'] = decoded['kp']
+            self.last['pid_ki'] = decoded['ki']
+            self.last['pid_kd'] = decoded['kd']
+            self.pid_revision = getattr(self, 'pid_revision', 0) + 1
+        elif kind == 'pid_write':
+            self.last['pid_write_status'] = decoded['status']
+            if decoded['status'] == 0x00:
+                return False
+        elif kind == 'scalar':
+            self.last[decoded['field']] = decoded['value']
+        elif kind == 'signed_position':
+            field = decoded['field']
+            counts = decoded['value']
+            self.last[field] = counts
+            if field == 'input_pulses':
+                pulses = counts
+                ppr = float(
+                    self.microsteps * self.full_steps_per_rotation)
+                self.last['input_pulses_mm'] = (
+                    pulses * self.rotation_distance / ppr)
+            else:
+                prefix = field[:-len('_counts')]
+                self.last[prefix + '_deg'] = self._counts_to_deg(counts)
+                self.last[prefix + '_mm'] = self._counts_to_mm(counts)
+        elif kind == 'motor_flags':
+            flags = decoded['flags']
             self.last['motor_flags'] = flags
             self.last['enabled'] = bool(flags & 0x01)
             self.last['reached'] = bool(flags & 0x02)
             self.last['stalled'] = bool(flags & 0x04)
             self.last['stall_protect'] = bool(flags & 0x08)
-            parsed = True
-        elif cmd == CMD_HOME_FLAGS and len(data) >= 4:
-            flags = data[2]
+        elif kind == 'home_flags':
+            flags = decoded['flags']
             self.last['home_flags'] = flags
             self.last['encoder_ready'] = bool(flags & 0x01)
             self.last['calibration_ready'] = bool(flags & 0x02)
             self.last['homing'] = bool(flags & 0x04)
             self.last['home_failed'] = bool(flags & 0x08)
-            parsed = True
+        else:
+            return False
         self.last['csv_logging'] = self.csv_logging
-        return parsed
+        return True
 
     def _counts_to_deg(self, counts):
         return counts * 360.0 / 65536.0
@@ -2762,8 +2645,6 @@ class ZdtEmm42V5Can:
     def get_status(self, eventtime):
         self._prune_error_history(eventtime)
         status = dict(self.last)
-        status['driver_config'] = dict(self.last.get('driver_config') or {})
-        status['settings_busy'] = self.settings_busy
         status['error_count'] = self.error_count
         status['last_error'] = self.last_error
         status['error_history'] = [dict(sample) for sample in self.error_history]
@@ -2779,7 +2660,48 @@ class ZdtEmm42V5Can:
         status['polling_enabled'] = bool(self.enabled)
         status['motor_enabled'] = status.get('enabled')
         status['autotune_active'] = bool(self.autotune_active)
-        status['device_settings'] = dict(status['driver_config'])
+        descriptor = getattr(
+            self, 'closed_loop_adapter_descriptor', None)
+        vendor = getattr(self, 'vendor', 'zdt')
+        model = getattr(self, 'model', 'emm42_v5')
+        transport_type = getattr(self, 'transport_type', 'can')
+        can_interface = getattr(self, 'can_interface', 'can0')
+        if descriptor is None:
+            descriptor = closed_loop_core.get_adapter_descriptor(
+                vendor, model, transport_type)
+        status['identity'] = {
+            'vendor': vendor,
+            'model': model,
+        }
+        status['adapter'] = closed_loop_core.adapter_status(descriptor)
+        status['endpoint'] = {
+            'transport': transport_type,
+            'interface': can_interface,
+            'address': self.addr,
+            'topology': 'multidrop',
+        }
+        status['settings'] = {
+            'revision': getattr(self, 'settings_revision', 0),
+            'busy': bool(self.settings_busy),
+            'temporary': bool(status.get('config_temporary')),
+            'error': str(status.get('config_error') or ''),
+            'values': dict(self.last.get('driver_config') or {}),
+        }
+        status['position_pid'] = {
+            'revision': getattr(self, 'pid_revision', 0),
+            'kp': status.get('pid_kp'),
+            'ki': status.get('pid_ki'),
+            'kd': status.get('pid_kd'),
+            'error': str(status.get('pid_error') or ''),
+        }
+        for legacy_key in (
+                'vendor', 'model', 'transport', 'interface', 'address',
+                'driver_config', 'device_settings', 'settings_busy',
+                'config_last_update_time', 'config_error',
+                'config_write_status', 'config_temporary', 'pid_kp',
+                'pid_ki', 'pid_kd', 'pid_last_update_time', 'pid_error',
+                'pid_write_status'):
+            status.pop(legacy_key, None)
         diagnostics = {
             'error_count': self.error_count,
             'last_error': self.last_error,

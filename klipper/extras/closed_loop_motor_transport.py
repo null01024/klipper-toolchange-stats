@@ -20,10 +20,121 @@ class TransportError(Exception):
     pass
 
 
-class SocketCanEndpoint:
+class TransportEndpoint:
+    """Physical transport contract. Endpoints never parse vendor commands."""
+
+    transport_type = 'unknown'
+    topology = 'point_to_point'
+
+    @property
+    def identity(self):
+        raise NotImplementedError
+
+    def acquire(self, owner):
+        raise NotImplementedError
+
+    def release(self, owner):
+        raise NotImplementedError
+
+    def close(self):
+        raise NotImplementedError
+
+    def diagnostics(self):
+        raise NotImplementedError
+
+
+class SerialTransportEndpoint(TransportEndpoint):
+    """Reserved contract for shared USB-RS485/RS232 endpoints.
+
+    Actual serial I/O is intentionally not implemented until a supported
+    device protocol supplies framing, timing, and topology requirements.
+    """
+
+    def __init__(self, spec):
+        self.spec = spec
+        self.owners = set()
+        self.subscribers = {}
+        self.last_error = 'serial transport is reserved but not implemented'
+
+    @property
+    def transport_type(self):
+        return self.spec.transport
+
+    @property
+    def topology(self):
+        return self.spec.topology
+
+    @property
+    def identity(self):
+        return self.spec.endpoint_key
+
+    @property
+    def signature(self):
+        return self.spec.signature
+
+    def register(self, owner, address, link_profile, callback,
+                 supports_daisy_chain=False):
+        address = int(address)
+        if address < 0:
+            raise TransportError('serial device address must not be negative')
+        if (self.spec.transport == 'rs232' and
+                self.spec.topology == 'daisy_chain' and
+                not supports_daisy_chain):
+            raise TransportError(
+                'RS232 daisy-chain use requires explicit device support')
+        if (self.spec.transport == 'rs232' and
+                self.spec.topology == 'point_to_point' and
+                self.subscribers and
+                all(value[0] is not owner
+                    for value in self.subscribers.values())):
+            raise TransportError(
+                'point-to-point RS232 endpoint already has a device')
+        current = self.subscribers.get(address)
+        if current is not None and current[0] is not owner:
+            raise TransportError(
+                "serial endpoint %s already has a device at address %d" %
+                (self.spec.interface, address))
+        self.subscribers[address] = (
+            owner, str(link_profile), callback,
+            bool(supports_daisy_chain))
+
+    def unregister(self, owner):
+        for address, value in list(self.subscribers.items()):
+            if value[0] is owner:
+                del self.subscribers[address]
+        self.owners.discard(owner)
+
+    def acquire(self, owner):
+        self.owners.add(owner)
+
+    def release(self, owner):
+        self.owners.discard(owner)
+
+    def write(self, owner, payload):
+        raise TransportError(self.last_error)
+
+    def close(self):
+        pass
+
+    def diagnostics(self):
+        return {
+            'transport': self.spec.transport,
+            'interface': self.spec.interface,
+            'topology': self.spec.topology,
+            'baud': self.spec.baud,
+            'data_bits': self.spec.data_bits,
+            'parity': self.spec.parity,
+            'stop_bits': self.spec.stop_bits,
+            'implemented': False,
+            'last_error': self.last_error,
+        }
+
+
+class SocketCanEndpoint(TransportEndpoint):
     """One reactor-owned SocketCAN connection shared by addressed devices."""
 
     transport_type = 'can'
+    topology = 'multidrop'
 
     def __init__(self, printer, interface):
         self.printer = printer
@@ -232,6 +343,21 @@ class ClosedLoopTransportManager:
         if endpoint is None:
             endpoint = self.endpoints[key] = SocketCanEndpoint(
                 self.printer, str(interface))
+        return endpoint
+
+    def serial(self, spec):
+        key = spec.endpoint_key
+        endpoint = self.endpoints.get(key)
+        if endpoint is None:
+            endpoint = self.endpoints[key] = SerialTransportEndpoint(spec)
+            return endpoint
+        if not isinstance(endpoint, SerialTransportEndpoint):
+            raise TransportError(
+                'transport endpoint identity is already in use')
+        if endpoint.signature != spec.signature:
+            raise TransportError(
+                '%s endpoint %s has conflicting serial settings' %
+                (spec.transport.upper(), spec.interface))
         return endpoint
 
     def _handle_disconnect(self):

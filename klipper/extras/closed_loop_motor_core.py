@@ -1,9 +1,10 @@
 # Shared registry and public identity helpers for closed-loop motors.
 
+import importlib
 import math
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MOTOR_OBJECT_TYPE = 'closed_loop_motor'
 GROUP_OBJECT_TYPE = 'closed_loop_motor_group'
 
@@ -11,8 +12,25 @@ ZDT_VENDOR = 'zdt'
 ZDT_MODEL = 'emm42_v5'
 CAN_TRANSPORT = 'can'
 
-SUPPORTED_COMBINATIONS = (
-    (ZDT_VENDOR, ZDT_MODEL, CAN_TRANSPORT),
+ADAPTER_REGISTRY = {
+    (ZDT_VENDOR, ZDT_MODEL, CAN_TRANSPORT): {
+        'id': 'zdt.emm42_v5.can',
+        'device_profile': 'zdt.emm42_v5',
+        'link_profile': 'zdt.emm42_v5.can',
+        'settings_profile': 'zdt.emm42_v5',
+        'settings_profile_version': 1,
+        'capabilities': None,
+        'supported_topologies': ('multidrop',),
+        'module': 'closed_loop_motor_zdt_emm42_v5_can',
+        'factory': 'ZdtEmm42V5Can',
+    },
+}
+
+PLANNED_COMBINATIONS = (
+    ('zdt', 'emm42_v5', 'rs485'),
+    ('zdt', 'emm42_v5', 'rs232'),
+    ('yanggong', 'pending', 'rs485'),
+    ('leadshine', 'pending', 'rs232'),
 )
 
 MOTOR_CAPABILITIES = (
@@ -31,6 +49,9 @@ MOTOR_CAPABILITIES = (
     'raw_query',
     'transport_sniff',
 )
+
+ADAPTER_REGISTRY[(ZDT_VENDOR, ZDT_MODEL, CAN_TRANSPORT)][
+    'capabilities'] = MOTOR_CAPABILITIES
 
 GROUP_MEMBER_API = (
     'closed_loop_identity',
@@ -115,9 +136,9 @@ def _identity(config):
     model = str(config.get('model', '')).strip().lower()
     transport = str(config.get('transport', '')).strip().lower()
     identity = (vendor, model, transport)
-    if identity not in SUPPORTED_COMBINATIONS:
+    if identity not in ADAPTER_REGISTRY:
         supported = ', '.join('/'.join(value)
-                              for value in SUPPORTED_COMBINATIONS)
+                              for value in ADAPTER_REGISTRY)
         raise config.error(
             "closed_loop_motor: unsupported vendor/model/transport "
             "combination '%s/%s/%s' (implemented: %s)" %
@@ -125,16 +146,46 @@ def _identity(config):
     return identity
 
 
+def get_adapter_descriptor(vendor, model, transport):
+    identity = (
+        str(vendor).strip().lower(), str(model).strip().lower(),
+        str(transport).strip().lower())
+    descriptor = ADAPTER_REGISTRY.get(identity)
+    return dict(descriptor) if descriptor is not None else None
+
+
+def adapter_status(descriptor):
+    return {
+        'id': descriptor['id'],
+        'device_profile': descriptor['device_profile'],
+        'link_profile': descriptor['link_profile'],
+        'settings_profile': descriptor['settings_profile'],
+        'settings_profile_version': descriptor['settings_profile_version'],
+    }
+
+
+def _load_adapter_module(module_name):
+    if __package__:
+        return importlib.import_module('.' + module_name, __package__)
+    return importlib.import_module(module_name)
+
+
 def create_motor(config):
     vendor, model, transport = _identity(config)
-    if (vendor, model, transport) == (
-            ZDT_VENDOR, ZDT_MODEL, CAN_TRANSPORT):
-        try:
-            from . import closed_loop_motor_zdt_emm42_v5_can as adapter
-        except ImportError:
-            import closed_loop_motor_zdt_emm42_v5_can as adapter
-        return adapter.ZdtEmm42V5Can(config)
-    raise config.error('closed_loop_motor: no adapter factory registered')
+    descriptor = ADAPTER_REGISTRY[(vendor, model, transport)]
+    module_name = descriptor['module']
+    try:
+        adapter = _load_adapter_module(module_name)
+    except ImportError as exc:
+        raise config.error(
+            "closed_loop_motor: failed to load adapter '%s': %s" %
+            (descriptor['id'], str(exc)))
+    factory = getattr(adapter, descriptor['factory'], None)
+    if factory is None:
+        raise config.error('closed_loop_motor: adapter factory is unavailable')
+    motor = factory(config)
+    motor.closed_loop_adapter_descriptor = dict(descriptor)
+    return motor
 
 
 def create_group(config):

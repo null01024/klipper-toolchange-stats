@@ -162,12 +162,14 @@ class ClosedLoopCoreXYGroup(group_base.ClosedLoopThreeZGroup):
                 self.max_error_deg),
         ]
         for member in status['members']:
+            position_pid = member.get('position_pid') or {}
+            endpoint = member.get('endpoint') or {}
             lines.append(
                 '%s address=%s online=%s error=%s deg PID=%s/%s/%s' % (
-                    member['name'], member['address'], member['online'],
+                    member['name'], endpoint.get('address'), member['online'],
                     self._fmt(member.get('error_deg')),
-                    member.get('pid_kp'), member.get('pid_ki'),
-                    member.get('pid_kd')))
+                    position_pid.get('kp'), position_pid.get('ki'),
+                    position_pid.get('kd')))
         if status['warning_reasons']:
             lines.append('warnings=%s' % status['warning_reasons'])
         gcmd.respond_info('\n'.join(lines))

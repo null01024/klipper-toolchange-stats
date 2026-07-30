@@ -24,7 +24,9 @@ TOOL_CALIBRATION_SCHEME="none"
 TOOL_HARDWARE_MODE=""
 FRESH_TOOL_COUNT=""
 FRONTEND_CHOICE=0
-TOOLCHANGER_STACK_RUNNING="${TOOLCHANGER_STACK_RUNNING:-0}"
+FRONTEND_NAME=""
+FRONTEND_SOURCE_PATH=""
+FRONTEND_TARGET_PATH=""
 MOONRAKER_COMPONENT_INSTALLED=0
 MOONRAKER_CONF_CHANGED=0
 TOOLS_CALIBRATE_URL="${TOOLS_CALIBRATE_URL:-https://raw.githubusercontent.com/viesturz/klipper-toolchanger/main/klipper/extras/tools_calibrate.py}"
@@ -164,16 +166,12 @@ function prompt_int_default {
 
 function ask_frontend_choice {
     local answer
-    if [ "${TOOLCHANGER_STACK_RUNNING}" = "1" ]; then
-        FRONTEND_CHOICE=0
-        return
-    fi
     while true; do
         cat <<EOF
 请选择是否安装/更新配套前端：
   0. 不安装/更新前端
-  1. Fluidd（维护可能不及时）
-  2. Mainsail
+  1. Mainsail
+  2. Fluidd（维护可能不及时）
 请输入 0,1,2 [0]: 
 EOF
         read_answer answer
@@ -191,6 +189,53 @@ EOF
         esac
     done
     echo
+}
+
+function resolve_frontend_paths {
+    case "${FRONTEND_CHOICE}" in
+        0)
+            FRONTEND_NAME=""
+            FRONTEND_SOURCE_PATH=""
+            FRONTEND_TARGET_PATH=""
+            ;;
+        1)
+            FRONTEND_NAME="Mainsail"
+            FRONTEND_SOURCE_PATH="${INSTALL_PATH}/mainsail"
+            FRONTEND_TARGET_PATH="${HOME}/mainsail"
+            ;;
+        2)
+            FRONTEND_NAME="Fluidd"
+            FRONTEND_SOURCE_PATH="${INSTALL_PATH}/fluidd"
+            FRONTEND_TARGET_PATH="${HOME}/fluidd"
+            ;;
+        *)
+            die "未知前端选择: ${FRONTEND_CHOICE}"
+            ;;
+    esac
+}
+
+function validate_frontend_if_requested {
+    local source_real target_real target_parent
+
+    resolve_frontend_paths
+    if [ "${FRONTEND_CHOICE}" -eq 0 ]; then
+        return
+    fi
+
+    [ -d "${FRONTEND_SOURCE_PATH}" ] || die "本地 ${FRONTEND_NAME} 产物目录不存在: ${FRONTEND_SOURCE_PATH}"
+    [ -r "${FRONTEND_SOURCE_PATH}" ] || die "本地 ${FRONTEND_NAME} 产物目录不可读: ${FRONTEND_SOURCE_PATH}"
+    [ -f "${FRONTEND_SOURCE_PATH}/index.html" ] || die "本地 ${FRONTEND_NAME} 产物缺少 index.html: ${FRONTEND_SOURCE_PATH}"
+
+    [ -d "${FRONTEND_TARGET_PATH}" ] || die "未检测到已安装的 ${FRONTEND_NAME}: ${FRONTEND_TARGET_PATH}。请先安装原版 ${FRONTEND_NAME}。"
+    [ -f "${FRONTEND_TARGET_PATH}/index.html" ] || die "现有 ${FRONTEND_NAME} 目录缺少 index.html: ${FRONTEND_TARGET_PATH}"
+
+    source_real="$(cd "${FRONTEND_SOURCE_PATH}" && pwd -P)"
+    target_real="$(cd "${FRONTEND_TARGET_PATH}" && pwd -P)"
+    [ "${source_real}" != "${target_real}" ] || die "本地产物目录不能与部署目录相同: ${source_real}"
+
+    target_parent="$(dirname "${FRONTEND_TARGET_PATH}")"
+    [ -w "${target_parent}" ] || die "当前用户无权写入前端父目录: ${target_parent}"
+    echo "[PRE-CHECK] ${FRONTEND_NAME} 本地产物和现有安装均有效。"
 }
 
 function proxy_url {
@@ -1216,38 +1261,58 @@ function restart_moonraker_if_needed {
 }
 
 function install_frontend_if_requested {
-    local stack_script="${INSTALL_PATH}/install_toolchanger_stack.sh"
-    local frontend_name skip_moonraker_config
+    local target_parent target_base staging backup
+
     if [ "${FRONTEND_CHOICE}" -eq 0 ]; then
         return
     fi
-    [ -f "${stack_script}" ] || die "未找到 install_toolchanger_stack.sh: ${stack_script}"
-    skip_moonraker_config=0
-    if [ "${INSTALL_MODE}" = "plugins" ]; then
-        skip_moonraker_config=1
+
+    [ -f "${FRONTEND_SOURCE_PATH}/index.html" ] || die "本地 ${FRONTEND_NAME} 产物已失效: ${FRONTEND_SOURCE_PATH}"
+    [ -f "${FRONTEND_TARGET_PATH}/index.html" ] || die "现有 ${FRONTEND_NAME} 安装已失效: ${FRONTEND_TARGET_PATH}"
+
+    target_parent="$(dirname "${FRONTEND_TARGET_PATH}")"
+    target_base="$(basename "${FRONTEND_TARGET_PATH}")"
+    staging="$(mktemp -d "${target_parent}/.${target_base}.install.XXXXXX")" || die "无法创建 ${FRONTEND_NAME} 暂存目录。"
+    backup="${target_parent}/.${target_base}.previous.$$"
+
+    if [ -e "${backup}" ] || [ -L "${backup}" ]; then
+        rm -rf -- "${staging}"
+        die "${FRONTEND_NAME} 备份目录已存在: ${backup}"
     fi
-    case "${FRONTEND_CHOICE}" in
-        1)
-            frontend_name="Fluidd"
-            echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 ${frontend_name} 前端..."
-            SKIP_PLUGIN_INSTALL=1 SKIP_MOONRAKER_CONFIG="${skip_moonraker_config}" \
-                TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
-                bash "${stack_script}" || die "安装/更新 ${frontend_name} 前端失败。"
-            ;;
-        2)
-            frontend_name="Mainsail"
-            echo "[POST-INSTALL] 调用 install_toolchanger_stack.sh 安装/更新 ${frontend_name} 前端..."
-            SKIP_PLUGIN_INSTALL=1 SKIP_MOONRAKER_CONFIG="${skip_moonraker_config}" \
-                TOOLCHANGER_STACK_RUNNING=1 GH_PROXY="${GH_PROXY}" \
-                FLUIDD_PATH="${HOME}/mainsail" \
-                FLUIDD_TOOLCHANGER_REPO="null01024/mainsail-toolchanger" \
-                FLUIDD_TOOLCHANGER_ASSET="mainsail.zip" \
-                FRONTEND_NAME="Mainsail" \
-                FRONTEND_TOOLCHANGER_NAME="mainsail-toolchanger" \
-                FRONTEND_UPDATE_MANAGER_NAME="mainsail-toolchanger" \
-                bash "${stack_script}" || die "安装/更新 ${frontend_name} 前端失败。"
-            ;;
-    esac
+
+    echo "[POST-INSTALL] 从本地产物安装/更新 ${FRONTEND_NAME}: ${FRONTEND_SOURCE_PATH}"
+    if ! cp -a "${FRONTEND_SOURCE_PATH}/." "${staging}/"; then
+        rm -rf -- "${staging}"
+        die "复制 ${FRONTEND_NAME} 本地产物失败。"
+    fi
+    if [ -f "${FRONTEND_TARGET_PATH}/config.json" ]; then
+        if ! cp "${FRONTEND_TARGET_PATH}/config.json" "${staging}/config.json"; then
+            rm -rf -- "${staging}"
+            die "保留 ${FRONTEND_NAME} config.json 失败。"
+        fi
+        echo "[CONFIG] 已保留现有 ${FRONTEND_NAME} config.json"
+    fi
+    if [ ! -f "${staging}/index.html" ]; then
+        rm -rf -- "${staging}"
+        die "${FRONTEND_NAME} 暂存目录缺少 index.html。"
+    fi
+
+    if ! mv "${FRONTEND_TARGET_PATH}" "${backup}"; then
+        rm -rf -- "${staging}"
+        die "备份现有 ${FRONTEND_NAME} 目录失败: ${FRONTEND_TARGET_PATH}"
+    fi
+    if ! mv "${staging}" "${FRONTEND_TARGET_PATH}"; then
+        if ! mv "${backup}" "${FRONTEND_TARGET_PATH}"; then
+            die "部署 ${FRONTEND_NAME} 失败，且无法恢复原目录: ${backup}"
+        fi
+        rm -rf -- "${staging}"
+        die "部署 ${FRONTEND_NAME} 失败，已恢复原目录。"
+    fi
+    if ! rm -rf -- "${backup}"; then
+        echo "[WARN] ${FRONTEND_NAME} 已更新，但无法清理备份目录: ${backup}" >&2
+    fi
+
+    echo "[DONE] ${FRONTEND_NAME} 已从本地产物更新: ${FRONTEND_TARGET_PATH}"
 }
 
 function print_plugins_completion {
@@ -1336,6 +1401,7 @@ function run_install {
     fi
 
     ask_frontend_choice
+    validate_frontend_if_requested
     link_extension
     link_moonraker_components
 

@@ -1,0 +1,1 @@
+import{S as e}from"./Viewer-DJSOGRsO.js";const t="logDepthFragment",r="#ifdef LOGARITHMICDEPTH\nfragmentOutputs.fragDepth=log2(fragmentInputs.vFragmentDepth)*uniforms.logarithmicDepthConstant*0.5;\n#endif\n";e.IncludesShadersStoreWGSL[t]||(e.IncludesShadersStoreWGSL[t]=r);
