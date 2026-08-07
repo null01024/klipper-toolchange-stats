@@ -18,11 +18,12 @@ CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
 REPO_URL="${REPO_URL:-https://github.com/null01024/klipper-toolchange-stats.git}"
 GH_PROXY="${GH_PROXY:-}"
 INSTALL_MODE="${INSTALL_MODE:-}"
-FRESH_INSTALL=0
 TOOLCHANGE_SCHEME="custom"
 TOOL_CALIBRATION_SCHEME="none"
 TOOL_HARDWARE_MODE=""
-FRESH_TOOL_COUNT=""
+DOCK_FAN_MODE=""
+MULTIHOTEND_BOARD=""
+MULTIHOTEND_TOOL_COUNT=""
 FRONTEND_CHOICE=0
 FRONTEND_NAME=""
 FRONTEND_SOURCE_PATH=""
@@ -39,6 +40,9 @@ CONFIG_SUBDIR="multitool"
 # 需要部署到用户配置目录的 cfg 列表（空格分隔，已存在则不覆盖）
 CONFIG_FILES="multitool_config.cfg"
 DEPLOYED_CONFIG_FILES="${CONFIG_FILES}"
+CONFIG_WORK_PATH=""
+CONFIG_STAGING_PATH=""
+CONFIG_BACKUP_PATH=""
 
 set -eu
 export LC_ALL=C
@@ -46,9 +50,33 @@ export LC_ALL=C
 RED="\033[0;31m"
 RESET="\033[0m"
 
+function cleanup_config_staging {
+    local staging="${CONFIG_STAGING_PATH:-}"
+
+    if [ -z "${staging}" ]; then
+        return 0
+    fi
+    case "${staging}" in
+        "${CONFIG_PATH}/.${CONFIG_SUBDIR}.install."*)
+            rm -rf -- "${staging}"
+            ;;
+    esac
+    CONFIG_STAGING_PATH=""
+    CONFIG_WORK_PATH=""
+}
+
 function die {
     printf "${RED}[ERROR] %s${RESET}\n" "$*" >&2
+    cleanup_config_staging
     exit 1
+}
+
+function config_work_path {
+    if [ -n "${CONFIG_WORK_PATH}" ]; then
+        printf "%s\n" "${CONFIG_WORK_PATH}"
+    else
+        printf "%s\n" "${CONFIG_PATH}/${CONFIG_SUBDIR}"
+    fi
 }
 
 function require_command {
@@ -536,9 +564,64 @@ function clean_orphan_links {
     done
 }
 
+function prepare_config_staging {
+    [ -d "${CONFIG_PATH}" ] || die "未找到 Klipper 配置目录: ${CONFIG_PATH}"
+    [ -w "${CONFIG_PATH}" ] || die "当前用户无权写入 Klipper 配置目录: ${CONFIG_PATH}"
+
+    CONFIG_STAGING_PATH="$(mktemp -d "${CONFIG_PATH}/.${CONFIG_SUBDIR}.install.XXXXXX")" \
+        || die "创建配置暂存目录失败: ${CONFIG_PATH}"
+    CONFIG_WORK_PATH="${CONFIG_STAGING_PATH}"
+    trap cleanup_config_staging EXIT
+    echo "[CONFIG] 在暂存目录生成全新配置: ${CONFIG_STAGING_PATH}"
+}
+
+function activate_staged_config {
+    local target="${CONFIG_PATH}/${CONFIG_SUBDIR}"
+    local staging="${CONFIG_STAGING_PATH}"
+    local backup_root=""
+    local backup_path=""
+
+    [ -n "${staging}" ] || die "配置暂存目录尚未创建。"
+    [ -d "${staging}" ] || die "配置暂存目录不存在: ${staging}"
+    [ -f "${staging}/multitool_config.cfg" ] || die "暂存配置缺少 multitool_config.cfg。"
+    [ -f "${staging}/multihotend.cfg" ] || die "暂存配置缺少 multihotend.cfg。"
+
+    if [ -e "${target}" ] || [ -L "${target}" ]; then
+        backup_root="$(mktemp -d "${CONFIG_PATH}/${CONFIG_SUBDIR}.backup.XXXXXX")" \
+            || die "创建配置备份目录失败: ${CONFIG_PATH}"
+        backup_path="${backup_root}/${CONFIG_SUBDIR}"
+        if ! mv "${target}" "${backup_path}"; then
+            rmdir "${backup_root}" 2>/dev/null || true
+            die "备份现有配置目录失败: ${target}"
+        fi
+    fi
+
+    if ! mv "${staging}" "${target}"; then
+        if [ -n "${backup_path}" ]; then
+            if mv "${backup_path}" "${target}"; then
+                rmdir "${backup_root}" 2>/dev/null || true
+                die "激活新配置失败，已恢复原配置目录。"
+            fi
+            CONFIG_STAGING_PATH=""
+            CONFIG_WORK_PATH=""
+            die "激活新配置失败，且无法恢复原配置。旧配置位于 ${backup_path}，新配置位于 ${staging}。"
+        fi
+        die "激活新配置失败: ${target}"
+    fi
+
+    CONFIG_STAGING_PATH=""
+    CONFIG_WORK_PATH=""
+    CONFIG_BACKUP_PATH="${backup_path}"
+    if [ -n "${CONFIG_BACKUP_PATH}" ]; then
+        echo "[CONFIG] 原配置已备份到: ${CONFIG_BACKUP_PATH}"
+    fi
+    echo "[CONFIG] 已启用全新配置目录: ${target}"
+}
+
 
 function copy_config {
-    local target_dir="${CONFIG_PATH}/${CONFIG_SUBDIR}"
+    local target_dir
+    target_dir="$(config_work_path)"
 
     echo "[CONFIG] 部署默认配置到 ${target_dir}/"
     mkdir -p "${target_dir}" || die "无法创建配置目录: ${target_dir}"
@@ -559,8 +642,10 @@ function copy_config {
 }
 
 function install_tool_calibration_config {
-    local target_dir="${CONFIG_PATH}/${CONFIG_SUBDIR}"
+    local target_dir
     local target_file
+
+    target_dir="$(config_work_path)"
 
     case "${TOOL_CALIBRATION_SCHEME}" in
         none)
@@ -654,6 +739,86 @@ EOF
     done
 }
 
+function ask_multihotend_board {
+    local answer
+    while true; do
+        cat <<EOF
+请选择多热端扩展板：
+  1) 通用自定义多热端板（最多 8 个热端，默认）
+  2) LSP CAN_XII（最多 12 个热端）
+
+EOF
+        printf "请输入选项 [1/2，默认 1]: "
+        read_answer answer
+        case "${answer}" in
+            ""|1)
+                MULTIHOTEND_BOARD="generic"
+                return
+                ;;
+            2)
+                MULTIHOTEND_BOARD="lsp_can_xii"
+                return
+                ;;
+            *) echo "输入无效，请输入 1 或 2。" ;;
+        esac
+    done
+}
+
+function multihotend_board_name {
+    case "${MULTIHOTEND_BOARD}" in
+        generic) printf "通用自定义多热端板\n" ;;
+        lsp_can_xii) printf "LSP CAN_XII\n" ;;
+        *) die "未知多热端扩展板: ${MULTIHOTEND_BOARD}" ;;
+    esac
+}
+
+function multihotend_board_max_tools {
+    case "${MULTIHOTEND_BOARD}" in
+        generic) printf "8\n" ;;
+        lsp_can_xii) printf "12\n" ;;
+        *) die "未知多热端扩展板: ${MULTIHOTEND_BOARD}" ;;
+    esac
+}
+
+function emit_multihotend_board_aliases {
+    case "${MULTIHOTEND_BOARD}" in
+        generic)
+            cat <<'EOF'
+aliases:                                            # 【必改】填写等号后的真实 MCU 引脚；别名名称保持不变
+    T7H=,T7S=,IO7=,
+    T6H=,T6S=,IO6=,
+    T5H=,T5S=,IO5=,
+    T4H=,T4S=,IO4=,
+    T3H=,T3S=,IO3=,
+    T2H=,T2S=,IO2=,
+    T1H=,T1S=,IO1=,
+    T0H=,T0S=,IO0=
+EOF
+            ;;
+        lsp_can_xii)
+            cat <<'EOF'
+aliases:                                            # LSP CAN_XII 固定引脚映射；别名可直接使用
+    T11H=PB7,T11S=PA0,IO11=PC15,
+    T10H=PB6,T10S=PA1,IO10=PC14,
+    T9H=PB5,T9S=PA2,IO9=PC13,
+    T8H=PB4,T8S=PA3,IO8=PC0,
+    T7H=PB3,T7S=PA4,IO7=PC1,
+    T6H=PC6,T6S=PA5,IO6=PC2,
+    T5H=PC7,T5S=PA6,IO5=PC3,
+    T4H=PC8,T4S=PA7,IO4=PD2,
+    T3H=PC9,T3S=PC4,IO3=PC12,
+    T2H=PA8,T2S=PC5,IO2=PC11,
+    T1H=PA9,T1S=PB0,IO1=PC10,
+    T0H=PA10,T0S=PB1,IO0=PA15,
+    FAN0=PB10,FAN1=PB2,RGB=PB11
+EOF
+            ;;
+        *)
+            die "未知多热端扩展板: ${MULTIHOTEND_BOARD}"
+            ;;
+    esac
+}
+
 function emit_full_extruder_section {
     local tool="${1}"
     local section stepper_label section_comment
@@ -725,21 +890,33 @@ EOF
 }
 
 function generate_multihotend_config {
-    local target_dir="${CONFIG_PATH}/${CONFIG_SUBDIR}"
-    local target_file="${target_dir}/multihotend.cfg"
-    local tool_count dock_fan_mode heaters i name
+    local target_dir target_file
+    local tool_count board_max board_name board_config_note heaters i name
 
-    if [ -z "${FRESH_TOOL_COUNT}" ]; then
-        FRESH_TOOL_COUNT="$(prompt_int_default "请输入热端数量 [1-8，默认 4]: " 4 1 8)"
+    target_dir="$(config_work_path)"
+    target_file="${target_dir}/multihotend.cfg"
+    if [ -z "${MULTIHOTEND_BOARD}" ]; then
+        ask_multihotend_board
     fi
-    tool_count="${FRESH_TOOL_COUNT}"
+    board_max="$(multihotend_board_max_tools)"
+    board_name="$(multihotend_board_name)"
+    if [ -z "${MULTIHOTEND_TOOL_COUNT}" ]; then
+        MULTIHOTEND_TOOL_COUNT="$(prompt_int_default "请输入热端数量 [1-${board_max}，默认 4]: " 4 1 "${board_max}")"
+    fi
+    case "${MULTIHOTEND_TOOL_COUNT}" in
+        *[!0-9]*|"") die "热端数量必须是 1..${board_max} 之间的数字。" ;;
+    esac
+    if [ "${MULTIHOTEND_TOOL_COUNT}" -lt 1 ] || [ "${MULTIHOTEND_TOOL_COUNT}" -gt "${board_max}" ]; then
+        die "${board_name} 支持的热端数量为 1..${board_max}，当前值为 ${MULTIHOTEND_TOOL_COUNT}。"
+    fi
+    tool_count="${MULTIHOTEND_TOOL_COUNT}"
 
     if [ -f "${target_file}" ]; then
         echo "[CONFIG] multihotend.cfg 已存在，跳过生成（保留用户修改）"
         return
     fi
 
-    echo "[CONFIG] 新安装：生成 multihotend.cfg"
+    echo "[CONFIG] 为 ${board_name} 生成 multihotend.cfg"
     mkdir -p "${target_dir}" || die "无法创建配置目录: ${target_dir}"
     [ -w "${target_dir}" ] || die "当前用户无权写入配置目录: ${target_dir}"
 
@@ -747,20 +924,28 @@ function generate_multihotend_config {
         TOOL_HARDWARE_MODE="$(ask_tool_hardware_mode)"
     fi
     if [ "${TOOL_HARDWARE_MODE}" = "multi_toolhead" ]; then
-        dock_fan_mode="per_tool"
+        DOCK_FAN_MODE="per_tool"
         echo "[CONFIG] 多工具头模式：dock_fan 固定为每个 extruder 一个风扇。"
-    else
-        dock_fan_mode="$(ask_dock_fan_mode)"
+    elif [ -z "${DOCK_FAN_MODE}" ]; then
+        DOCK_FAN_MODE="$(ask_dock_fan_mode)"
     fi
     heaters="$(extruder_list "${tool_count}")"
+
+    if [ "${MULTIHOTEND_BOARD}" = "lsp_can_xii" ]; then
+        board_config_note="请替换所有 TODO_* 占位；LSP CAN_XII 的 board_pins aliases 已固定，无需修改。"
+    else
+        board_config_note="请替换所有 TODO_* 占位，并填写 [board_pins multihotend] 中等号后的真实 MCU 引脚。"
+    fi
 
     {
         cat <<EOF
 #####################################################################
 # Multihotend 配置模板
 #
-# 此文件由 install.sh 在新安装模式下生成。
-# 重要：请先替换所有 TODO_* 占位，并填写 [board_pins multihotend] 中等号后的真实 MCU 引脚，再重启 Klipper。
+# 此文件由 install.sh 自动生成。
+# 扩展板型号：${board_name}
+# 重要：${board_config_note}
+# 完成配置后再重启 Klipper。
 #####################################################################
 
 # 多热端扩展板 MCU，名称固定为 multihotend
@@ -770,22 +955,18 @@ canbus_uuid: TODO_CANBUS_UUID                       # 【必改】扩展板 CAN 
 # 为 multihotend MCU 定义引脚别名，便于后续引用
 [board_pins multihotend]
 mcu: multihotend                                    # 这些别名属于上面的 [mcu multihotend]
-aliases:                                            # 【必改】填写等号后的真实 MCU 引脚；别名名称保持不变
-    T7H=,T7S=,IO7=,
-    T6H=,T6S=,IO6=,
-    T5H=,T5S=,IO5=,
-    T4H=,T4S=,IO4=,
-    T3H=,T3S=,IO3=,
-    T2H=,T2S=,IO2=,
-    T1H=,T1S=,IO1=,
-    T0H=,T0S=,IO0=
+EOF
+
+        emit_multihotend_board_aliases
+
+        cat <<EOF
 
 #####################################################################
 # 风扇
 #####################################################################
 EOF
 
-        if [ "${dock_fan_mode}" = "shared" ]; then
+        if [ "${DOCK_FAN_MODE}" = "shared" ]; then
             cat <<EOF
 # 共享停靠坞风扇，监听所有热端温度
 [heater_fan dock_fan]
@@ -864,7 +1045,12 @@ EOF
     } > "${target_file}" || die "生成 multihotend.cfg 失败: ${target_file}"
 
     echo "  -> 已生成 multihotend.cfg"
-    echo "     请填写其中所有 TODO_* 字段，以及 [board_pins multihotend] 中等号后的真实 MCU 引脚后再使用。"
+    if [ "${MULTIHOTEND_BOARD}" = "lsp_can_xii" ]; then
+        echo "     LSP CAN_XII 引脚别名已写入；FAN0、FAN1、RGB 仅预留，当前配置未使用。"
+        echo "     请填写 canbus_uuid、风扇、挤出机等其余 TODO_* 字段后再使用。"
+    else
+        echo "     请填写所有 TODO_* 字段，以及 [board_pins multihotend] 中等号后的真实 MCU 引脚后再使用。"
+    fi
     if [ "${TOOL_HARDWARE_MODE}" = "multi_toolhead" ]; then
         echo "     多工具头模式请在 multitool_config.cfg 中确认 sync_extruder_motion: False。"
     fi
@@ -872,8 +1058,10 @@ EOF
 
 function patch_multitool_config_tool_count {
     local count="${1}"
-    local cfg="${CONFIG_PATH}/${CONFIG_SUBDIR}/multitool_config.cfg"
+    local cfg
     local tmp_cfg
+
+    cfg="$(config_work_path)/multitool_config.cfg"
 
     [ -f "${cfg}" ] || {
         echo "[CONFIG] 未找到 multitool_config.cfg，无法自动设置 tool_count。"
@@ -923,9 +1111,11 @@ function patch_multitool_config_tool_count {
 }
 
 function calibration_config_file {
+    local target_dir
+    target_dir="$(config_work_path)"
     case "${TOOL_CALIBRATION_SCHEME}" in
-        touch) printf "%s\n" "${CONFIG_PATH}/${CONFIG_SUBDIR}/calibration.cfg" ;;
-        eddy) printf "%s\n" "${CONFIG_PATH}/${CONFIG_SUBDIR}/calibration-eddy.cfg" ;;
+        touch) printf "%s\n" "${target_dir}/calibration.cfg" ;;
+        eddy) printf "%s\n" "${target_dir}/calibration-eddy.cfg" ;;
         *) return 1 ;;
     esac
 }
@@ -989,8 +1179,10 @@ function patch_calibration_tool_count {
 
 function patch_cxchanger_config_tool_count {
     local count="${1}"
-    local cfg="${CONFIG_PATH}/${CONFIG_SUBDIR}/change_tool.cfg"
+    local cfg
     local tmp_cfg
+
+    cfg="$(config_work_path)/change_tool.cfg"
 
     [ -f "${cfg}" ] || {
         echo "[CONFIG] 未找到 change_tool.cfg，无法自动调整 CxChanger dock 坐标变量。"
@@ -1078,8 +1270,8 @@ function patch_cxchanger_config_tool_count {
     esac
 }
 
-function patch_fresh_install_tool_count_configs {
-    local count="${FRESH_TOOL_COUNT}"
+function patch_generated_tool_count_configs {
+    local count="${MULTIHOTEND_TOOL_COUNT}"
     if [ -z "${count}" ]; then
         return
     fi
@@ -1142,10 +1334,34 @@ EOF
     done
 }
 
+function ask_multihotend_generation_options {
+    local board_max
+
+    if [ -z "${MULTIHOTEND_BOARD}" ]; then
+        ask_multihotend_board
+    fi
+    board_max="$(multihotend_board_max_tools)"
+    MULTIHOTEND_TOOL_COUNT="$(prompt_int_default "请输入热端数量 [1-${board_max}，默认 4]: " 4 1 "${board_max}")"
+
+    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
+        TOOL_HARDWARE_MODE="shared_extruder"
+    else
+        TOOL_HARDWARE_MODE="$(ask_tool_hardware_mode)"
+    fi
+
+    if [ "${TOOL_HARDWARE_MODE}" = "multi_toolhead" ]; then
+        DOCK_FAN_MODE="per_tool"
+    else
+        DOCK_FAN_MODE="$(ask_dock_fan_mode)"
+    fi
+}
+
 function install_cxchanger_config {
-    local target_dir="${CONFIG_PATH}/${CONFIG_SUBDIR}"
-    local target_file="${target_dir}/change_tool.cfg"
+    local target_dir target_file
     local source_file="${INSTALL_PATH}/schemes/CxChanger/change_tool.cfg"
+
+    target_dir="$(config_work_path)"
+    target_file="${target_dir}/change_tool.cfg"
 
     [ -f "${source_file}" ] || die "缺少 CxChanger 换头模板: ${source_file}"
     if [ -f "${target_file}" ]; then
@@ -1157,8 +1373,10 @@ function install_cxchanger_config {
 }
 
 function patch_multitool_hooks_for_cxchanger {
-    local cfg="${CONFIG_PATH}/${CONFIG_SUBDIR}/multitool_config.cfg"
+    local cfg
     local tmp_cfg
+
+    cfg="$(config_work_path)/multitool_config.cfg"
 
     if [ ! -f "${cfg}" ]; then
         echo "[CONFIG] 未找到 multitool_config.cfg，无法自动调整 CxChanger 钩子。"
@@ -1328,13 +1546,30 @@ EOF
 }
 
 function print_configure_completion {
+    local board_name
+    board_name="$(multihotend_board_name)"
+
     cat <<EOF
 
 [DONE] 安装及换热端配置完成。
 
-默认配置已部署到：
+扩展板：${board_name}
+热端数量：${MULTIHOTEND_TOOL_COUNT}
+
+全新配置已部署到：
     ${CONFIG_PATH}/${CONFIG_SUBDIR}/
         ${DEPLOYED_CONFIG_FILES}
+EOF
+
+    if [ -n "${CONFIG_BACKUP_PATH}" ]; then
+        cat <<EOF
+
+原配置备份：
+    ${CONFIG_BACKUP_PATH}
+EOF
+    fi
+
+    cat <<EOF
 
 printer.cfg 已检查以下 include：
     ${INCLUDE_LINE}
@@ -1347,12 +1582,25 @@ printer.cfg 已检查以下 include：
        - 自定义方案：实现 multitool_release_tool / multitool_pickup_tool
        - CxChanger 方案：确认钩子已转发到 _release_tool / _pickup_tool
 
-    2. 如果本次新生成了 multihotend.cfg，必须填写所有 TODO_* 和 board_pins 引脚值：
+    2. 修改 ${CONFIG_PATH}/${CONFIG_SUBDIR}/multihotend.cfg：
        - canbus_uuid
-       - board_pins aliases 中等号后的真实 MCU 引脚
        - fan pin
        - extruder step/dir/enable/uart pin
        - rotation_distance / sensor_type 等挤出机参数
+EOF
+
+    if [ "${MULTIHOTEND_BOARD}" = "lsp_can_xii" ]; then
+        cat <<EOF
+       - LSP CAN_XII 的 T0..T11 / IO0..IO11 引脚别名已写入，无需修改
+       - FAN0、FAN1、RGB 已预留为别名，当前没有配置使用它们
+EOF
+    else
+        cat <<EOF
+       - 填写 board_pins aliases 中等号后的真实 MCU 引脚
+EOF
+    fi
+
+    cat <<EOF
 
     3. 如果使用 CxChanger，请修改 ${CONFIG_PATH}/${CONFIG_SUBDIR}/change_tool.cfg
        - 每个工具的 dock_x / dock_y
@@ -1386,10 +1634,15 @@ function run_install {
     sync_repo
 
     if [ "${INSTALL_MODE}" = "configure" ]; then
-        FRESH_INSTALL=1
+        ask_multihotend_board
         ask_tool_calibration_scheme
+        ask_toolchange_scheme
+        ask_multihotend_generation_options
+        DEPLOYED_CONFIG_FILES="${DEPLOYED_CONFIG_FILES} multihotend.cfg"
+        if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
+            DEPLOYED_CONFIG_FILES="${DEPLOYED_CONFIG_FILES} change_tool.cfg"
+        fi
     else
-        FRESH_INSTALL=0
         TOOL_CALIBRATION_SCHEME="none"
         DEPLOYED_CONFIG_FILES=""
     fi
@@ -1407,20 +1660,18 @@ function run_install {
     clean_orphan_links
 
     if [ "${INSTALL_MODE}" = "configure" ]; then
+        prepare_config_staging
         copy_config
         install_tool_calibration_config
-        ask_toolchange_scheme
-        if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
-            TOOL_HARDWARE_MODE="shared_extruder"
-        fi
         generate_multihotend_config
         if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
             install_cxchanger_config
         fi
-        patch_fresh_install_tool_count_configs
+        patch_generated_tool_count_configs
         if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
             patch_multitool_hooks_for_cxchanger
         fi
+        activate_staged_config
         patch_printer_cfg
     fi
 
