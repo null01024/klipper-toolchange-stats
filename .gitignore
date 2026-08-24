@@ -7,3 +7,5 @@ local/
 .*/
 docs/
 tests/
+!tests/
+tests/*
