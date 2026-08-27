@@ -5,8 +5,8 @@
 #   bash ~/klipper-toolchange-stats/uninstall.sh
 #
 # This script removes the Klipper/Moonraker backend pieces installed by
-# install.sh. It intentionally does not uninstall Fluidd/Mainsail frontend
-# directories or frontend update_manager sections.
+# install.sh. It intentionally does not uninstall the Mainsail frontend
+# directory or frontend update_manager sections.
 
 set -euo pipefail
 export LC_ALL=C
