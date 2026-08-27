@@ -1613,8 +1613,9 @@ EOF
     5. 涡流对刀详细配置和使用说明
        - https://demo.chengxg.top/pangxie/#/articles/eddy_calibration
 
-    更多配置说明请查看 README：
-    https://github.com/null01024/klipper-toolchange-stats#readme
+    完整教程和配置参考：
+    https://github.com/null01024/klipper-toolchange-stats/wiki/Quick-Start
+    https://github.com/null01024/klipper-toolchange-stats/wiki/Configuration-Reference
 
 可选: 在 moonraker.conf 中添加 update_manager 以支持 OTA 更新：
 
@@ -1689,7 +1690,7 @@ function run_install {
 function main {
     printf "\n=========================================\n"
     echo "- Klipper multitool-stats 安装/更新脚本 -"
-    echo "视频安装教程: https://www.bilibili.com/video/BV1dYTM6MEh2"
+    echo "完整安装文档: https://github.com/null01024/klipper-toolchange-stats/wiki/Quick-Start"
     printf "=========================================\n\n"
 
     ask_install_mode

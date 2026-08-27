@@ -2,13 +2,18 @@
 
 这是一个 Klipper 多热端 / 多工具头换头插件。它负责注册 `T0`、`T1` 这类换头命令，并在换头时自动处理当前工具状态、偏移、温度等待、耗材检查、断料续打、换头统计等流程。
 
-配合 [mainsail-toolchanger](https://github.com/null01024/mainsail-toolchanger) / [fluidd-toolchange](https://github.com/null01024/fluidd-toolchanger) 网页前端后，可以在 Mainsail / Fluidd 中直观看到多工具头状态、耗材状态和换头统计：
+仓库已经内置编译好的 Mainsail 前端产物。通过安装脚本部署后，可以在 Mainsail 中直观看到多工具头状态、耗材状态和换头统计：
 
-![mainsail-toolchanger 前端预览](img/web_preview.png)
+![Mainsail 前端预览](img/web_preview.png)
 
-![fluidd-toolchanger 前端预览](img/fluidd_preview.png)
+## 文档
 
-这份 README 面向第一次安装的用户，重点说明怎么安装、安装后要改哪些配置、怎么验证能不能正常工作。
+- [Quick Start：从零到第一次安全换头](https://github.com/null01024/klipper-toolchange-stats/wiki/Quick-Start)
+- [完整中文 Wiki](https://github.com/null01024/klipper-toolchange-stats/wiki)
+- [配置参考](https://github.com/null01024/klipper-toolchange-stats/wiki/Configuration-Reference)
+- [故障排查](https://github.com/null01024/klipper-toolchange-stats/wiki/Troubleshooting-Startup)
+
+Wiki 提供从安装、机械换头、偏移校准、切片器配置到可选模块和故障恢复的完整教程。本 README 保留项目概览和主要配置字段，方便快速查阅。
 
 ## 适合谁使用
 
