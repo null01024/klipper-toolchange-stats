@@ -1,5 +1,7 @@
 # klipper-toolchange-stats
 
+![klipper-toolchange-stats 多工具头换头统计封面](img/klipper-toolchange-stats-cover.png)
+
 这是一个 Klipper 多热端 / 多工具头换头插件。它负责注册 `T0`、`T1` 这类换头命令，并在换头时自动处理当前工具状态、偏移、温度等待、耗材检查、断料续打、换头统计等流程。
 
 仓库已经内置编译好的 Mainsail 前端产物。通过安装脚本部署后，可以在 Mainsail 中直观看到多工具头状态、耗材状态和换头统计：
