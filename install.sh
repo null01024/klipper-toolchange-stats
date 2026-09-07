@@ -417,7 +417,7 @@ function link_extension {
         local base target
         base="$(basename "${file}")"
         case "${base}" in
-            tools_calibrate.py|tool_eddy_calibration.py)
+            tools_calibrate.py|tool_eddy_calibration.py|closed_loop_motor*.py)
                 continue
                 ;;
         esac
