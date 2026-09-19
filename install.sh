@@ -40,6 +40,7 @@ MULTIHOTEND_BOARD_PROFILE=""
 MULTIHOTEND_BOARD_NAME=""
 MULTIHOTEND_BOARD_MAX_TOOLS=""
 MULTIHOTEND_BOARD_CONFIG_NOTE=""
+MULTIHOTEND_BOARD_DOCK_FAN_ALIAS_PREFIX=""
 MULTIHOTEND_BOARD_BODY_START=""
 MULTIHOTEND_BOARD_GENERATE_NOTES=()
 MULTIHOTEND_BOARD_COMPLETION_NOTES=()
@@ -235,6 +236,7 @@ function reset_profile_values {
     PROFILE_NAME=""
     PROFILE_MAX_TOOLS=""
     PROFILE_CONFIG_NOTE=""
+    PROFILE_DOCK_FAN_ALIAS_PREFIX=""
     PROFILE_DESCRIPTION=""
     PROFILE_HARDWARE_MODE=""
     PROFILE_RELEASE_MACRO=""
@@ -276,9 +278,13 @@ function validate_board_profile_body {
     local file="${1}"
     local body_start="${2}"
     local max_tools="${3}"
+    local dock_fan_alias_prefix="${4}"
     local validation_error
 
-    if validation_error="$(awk -v start="${body_start}" -v max_tools="${max_tools}" '
+    if validation_error="$(awk \
+            -v start="${body_start}" \
+            -v max_tools="${max_tools}" \
+            -v fan_prefix="${dock_fan_alias_prefix}" '
         function fail(message) {
             print message
             failed = 1
@@ -324,7 +330,9 @@ function validate_board_profile_body {
                 if (alias_name in seen) {
                     fail("重复 alias: " alias_name)
                 }
+                alias_value = trim(substr(entry, equal_at + 1))
                 seen[alias_name] = 1
+                values[alias_name] = alias_value
             }
         }
         END {
@@ -342,6 +350,15 @@ function validate_board_profile_body {
                 }
                 if (!(sensor in seen)) {
                     fail("缺少必需 alias: " sensor)
+                }
+                if (fan_prefix != "") {
+                    fan = fan_prefix i
+                    if (!(fan in seen)) {
+                        fail("缺少停靠坞风扇 alias: " fan)
+                    }
+                    if (values[fan] == "") {
+                        fail("停靠坞风扇 alias 未设置引脚: " fan)
+                    }
                 }
             }
             for (alias_name in seen) {
@@ -544,6 +561,13 @@ function parse_profile {
                 [ -z "${PROFILE_CONFIG_NOTE}" ] || profile_error "${file}" "字段 config_note 重复。"
                 PROFILE_CONFIG_NOTE="${value}"
                 ;;
+            dock_fan_alias_prefix)
+                [ "${profile_type}" = "board" ] \
+                    || profile_error "${file}" "换头方案不支持字段 dock_fan_alias_prefix。"
+                [ -z "${PROFILE_DOCK_FAN_ALIAS_PREFIX}" ] \
+                    || profile_error "${file}" "字段 dock_fan_alias_prefix 重复。"
+                PROFILE_DOCK_FAN_ALIAS_PREFIX="${value}"
+                ;;
             generate_note)
                 [ "${profile_type}" = "board" ] || profile_error "${file}" "换头方案不支持字段 generate_note。"
                 PROFILE_GENERATE_NOTES+=("${value}")
@@ -584,7 +608,20 @@ function parse_profile {
                 *) profile_error "${file}" "max_tools 必须是 1..16 的整数。" ;;
             esac
             [ -n "${PROFILE_CONFIG_NOTE}" ] || profile_error "${file}" "缺少字段 config_note。"
-            validate_board_profile_body "${file}" "${PROFILE_BODY_START}" "${PROFILE_MAX_TOOLS}"
+            if [ -n "${PROFILE_DOCK_FAN_ALIAS_PREFIX}" ]; then
+                case "${PROFILE_DOCK_FAN_ALIAS_PREFIX}" in
+                    [A-Za-z_]*) ;;
+                    *) profile_error "${file}" "dock_fan_alias_prefix 必须是合法的 alias 前缀。" ;;
+                esac
+                case "${PROFILE_DOCK_FAN_ALIAS_PREFIX}" in
+                    *[!A-Za-z0-9_]*)
+                        profile_error "${file}" "dock_fan_alias_prefix 必须是合法的 alias 前缀。"
+                        ;;
+                esac
+            fi
+            validate_board_profile_body \
+                "${file}" "${PROFILE_BODY_START}" "${PROFILE_MAX_TOOLS}" \
+                "${PROFILE_DOCK_FAN_ALIAS_PREFIX}"
             ;;
         toolchange)
             [ -n "${PROFILE_DESCRIPTION}" ] || profile_error "${file}" "缺少字段 description。"
@@ -695,6 +732,7 @@ function select_board_profile_file {
     MULTIHOTEND_BOARD_NAME="${PROFILE_NAME}"
     MULTIHOTEND_BOARD_MAX_TOOLS="${PROFILE_MAX_TOOLS}"
     MULTIHOTEND_BOARD_CONFIG_NOTE="${PROFILE_CONFIG_NOTE}"
+    MULTIHOTEND_BOARD_DOCK_FAN_ALIAS_PREFIX="${PROFILE_DOCK_FAN_ALIAS_PREFIX}"
     MULTIHOTEND_BOARD_BODY_START="${PROFILE_BODY_START}"
     MULTIHOTEND_BOARD_GENERATE_NOTES=("${PROFILE_GENERATE_NOTES[@]}")
     MULTIHOTEND_BOARD_COMPLETION_NOTES=("${PROFILE_COMPLETION_NOTES[@]}")
@@ -1428,6 +1466,7 @@ EOF
 function generate_multihotend_config {
     local target_dir target_file
     local tool_count board_max default_tool_count board_name board_config_note heaters i name note
+    local dock_fan_pin dock_fan_pin_note
 
     target_dir="$(config_work_path)"
     target_file="${target_dir}/multihotend.cfg"
@@ -1513,10 +1552,16 @@ EOF
         else
             for ((i = 0; i < tool_count; i++)); do
                 name="$(extruder_name "${i}")"
+                dock_fan_pin="TODO_DOCK_FAN_T${i}_PIN"
+                dock_fan_pin_note="【必改】T${i} dock_fan 风扇输出引脚"
+                if [ -n "${MULTIHOTEND_BOARD_DOCK_FAN_ALIAS_PREFIX}" ]; then
+                    dock_fan_pin="multihotend:${MULTIHOTEND_BOARD_DOCK_FAN_ALIAS_PREFIX}${i}"
+                    dock_fan_pin_note="${board_name} 固定 T${i} 停靠坞风扇引脚"
+                fi
                 cat <<EOF
 # T${i} 独立停靠坞风扇，只监听 ${name}
 [heater_fan dock_fan_t${i}]
-pin: TODO_DOCK_FAN_T${i}_PIN                        # 【必改】T${i} dock_fan 风扇输出引脚
+pin: ${dock_fan_pin}                                # ${dock_fan_pin_note}
 max_power: 1.0                                      # 风扇最大功率比例，1.0 表示 100%
 kick_start_time: 0.5                                # 风扇启动助推时间，防止低速不转
 heater: ${name}                                     # 只监听当前工具对应的热端

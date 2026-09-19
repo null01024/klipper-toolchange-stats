@@ -20,6 +20,10 @@ Required scalar fields:
   max_tools=<integer from 1 to 16>
   config_note=<note written to multihotend.cfg>
 
+Optional scalar fields:
+
+  dock_fan_alias_prefix=<alias prefix for per-tool dock fans>
+
 Repeatable fields:
 
   generate_note=<line printed after generation>
@@ -27,7 +31,9 @@ Repeatable fields:
 
 The body after "---" is one Klipper aliases block. It must define each TnH and
 TnS from T0 through max_tools - 1 exactly once. Extra aliases such as IOn,
-FANn, or RGB are allowed.
+FANn, or RGB are allowed. When dock_fan_alias_prefix is set, the body must also
+define a non-empty <prefix>0 through <prefix><max_tools - 1>. Per-tool dock fan
+configuration uses these aliases; shared dock fan configuration remains manual.
 
 Toolchange profiles
 -------------------
