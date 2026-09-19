@@ -1,0 +1,59 @@
+Profile format version 1
+========================
+
+The installer reads repository-managed profiles from:
+
+  profiles/boards/*.conf
+  profiles/toolchange/*.conf
+
+Files are ordered by filename with LC_ALL=C. Metadata uses key=value lines and
+ends at a line containing exactly "---". Files must use LF line endings, end
+with a newline, and must not contain tabs or other control characters.
+
+Board profiles
+--------------
+
+Required scalar fields:
+
+  format_version=1
+  name=<menu label>
+  max_tools=<integer from 1 to 16>
+  config_note=<note written to multihotend.cfg>
+
+Repeatable fields:
+
+  generate_note=<line printed after generation>
+  completion_note=<line printed in the final checklist>
+
+The body after "---" is one Klipper aliases block. It must define each TnH and
+TnS from T0 through max_tools - 1 exactly once. Extra aliases such as IOn,
+FANn, or RGB are allowed.
+
+Toolchange profiles
+-------------------
+
+Required scalar fields:
+
+  format_version=1
+  name=<menu label>
+  description=<short menu description or project URL>
+  hardware_mode=prompt|shared_extruder|multi_toolhead
+  release_macro=<macro called by multitool_release_tool>
+  pickup_macro=<macro called by multitool_pickup_tool>
+
+Repeatable fields:
+
+  completion_note=<line printed in the final checklist>
+
+The body after "---" is the complete change_tool.cfg template. It must define
+the declared release and pickup macros exactly once and must not redefine the
+public multitool_release_tool or multitool_pickup_tool hooks.
+
+A template may contain one per-tool expansion block:
+
+  # BEGIN MULTITOOL_TOOL_TEMPLATE
+  variable_t@@TOOL@@_dock_x: 0
+  # END MULTITOOL_TOOL_TEMPLATE
+
+The installer repeats that block for every configured tool and replaces every
+@@TOOL@@ token inside the block with its zero-based tool number.

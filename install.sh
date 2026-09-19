@@ -24,6 +24,33 @@ TOOL_HARDWARE_MODE=""
 DOCK_FAN_MODE=""
 MULTIHOTEND_BOARD=""
 MULTIHOTEND_TOOL_COUNT=""
+PROFILE_ROOT="${INSTALL_PATH}/profiles"
+BOARD_PROFILE_DIR="${PROFILE_ROOT}/boards"
+TOOLCHANGE_PROFILE_DIR="${PROFILE_ROOT}/toolchange"
+BOARD_PROFILE_FILES=()
+BOARD_PROFILE_NAMES=()
+BOARD_PROFILE_MAX_TOOLS=()
+TOOLCHANGE_PROFILE_FILES=()
+TOOLCHANGE_PROFILE_NAMES=()
+TOOLCHANGE_PROFILE_DESCRIPTIONS=()
+DISCOVERED_PROFILE_FILES=()
+PROFILE_GENERATE_NOTES=()
+PROFILE_COMPLETION_NOTES=()
+MULTIHOTEND_BOARD_PROFILE=""
+MULTIHOTEND_BOARD_NAME=""
+MULTIHOTEND_BOARD_MAX_TOOLS=""
+MULTIHOTEND_BOARD_CONFIG_NOTE=""
+MULTIHOTEND_BOARD_BODY_START=""
+MULTIHOTEND_BOARD_GENERATE_NOTES=()
+MULTIHOTEND_BOARD_COMPLETION_NOTES=()
+TOOLCHANGE_PROFILE=""
+TOOLCHANGE_NAME="自定义"
+TOOLCHANGE_DESCRIPTION="自定义换头/换热端移动路径。"
+TOOLCHANGE_PROFILE_HARDWARE_MODE="prompt"
+TOOLCHANGE_RELEASE_MACRO=""
+TOOLCHANGE_PICKUP_MACRO=""
+TOOLCHANGE_BODY_START=""
+TOOLCHANGE_COMPLETION_NOTES=()
 FRONTEND_CHOICE=0
 FRONTEND_NAME=""
 FRONTEND_SOURCE_PATH=""
@@ -170,7 +197,7 @@ function prompt_int_default {
     local default="${2}"
     local min="${3}"
     local max="${4}"
-    local answer
+    local answer answer_number
     while true; do
         printf "%s" "${prompt}" >&2
         read_answer answer
@@ -182,14 +209,530 @@ function prompt_int_default {
                 echo "请输入 ${min}..${max} 之间的数字。" >&2
                 ;;
             *)
-                if [ "${answer}" -ge "${min}" ] && [ "${answer}" -le "${max}" ]; then
-                    printf "%s\n" "${answer}"
+                if [ "${#answer}" -gt 6 ]; then
+                    echo "请输入 ${min}..${max} 之间的数字。" >&2
+                    continue
+                fi
+                answer_number=$((10#${answer}))
+                if [ "${answer_number}" -ge "${min}" ] && [ "${answer_number}" -le "${max}" ]; then
+                    printf "%s\n" "${answer_number}"
                     return
                 fi
                 echo "请输入 ${min}..${max} 之间的数字。" >&2
                 ;;
         esac
     done
+}
+
+function profile_error {
+    local file="${1}"
+    shift
+    die "无效 profile (${file}): $*"
+}
+
+function reset_profile_values {
+    PROFILE_FORMAT_VERSION=""
+    PROFILE_NAME=""
+    PROFILE_MAX_TOOLS=""
+    PROFILE_CONFIG_NOTE=""
+    PROFILE_DESCRIPTION=""
+    PROFILE_HARDWARE_MODE=""
+    PROFILE_RELEASE_MACRO=""
+    PROFILE_PICKUP_MACRO=""
+    PROFILE_BODY_START=0
+    PROFILE_BODY_LINE_COUNT=0
+    PROFILE_GENERATE_NOTES=()
+    PROFILE_COMPLETION_NOTES=()
+}
+
+function validate_profile_text_file {
+    local file="${1}"
+    local last_byte
+
+    [ -f "${file}" ] || profile_error "${file}" "不是普通文件。"
+    [ ! -L "${file}" ] || profile_error "${file}" "不允许使用符号链接。"
+    [ -r "${file}" ] || profile_error "${file}" "文件不可读。"
+    [ -s "${file}" ] || profile_error "${file}" "文件为空。"
+
+    if LC_ALL=C grep -q '[[:cntrl:]]' "${file}"; then
+        profile_error "${file}" "只允许 LF 换行，且不能包含制表符或其它控制字符。"
+    fi
+    last_byte="$(tail -c 1 -- "${file}")"
+    [ -z "${last_byte}" ] || profile_error "${file}" "文件末尾必须包含 LF 换行。"
+}
+
+function validate_profile_metadata_value {
+    local file="${1}"
+    local key="${2}"
+    local value="${3}"
+
+    [ -n "${value}" ] || profile_error "${file}" "字段 ${key} 不能为空。"
+    case "${value}" in
+        " "*|*" ") profile_error "${file}" "字段 ${key} 不能包含首尾空格。" ;;
+    esac
+}
+
+function validate_board_profile_body {
+    local file="${1}"
+    local body_start="${2}"
+    local max_tools="${3}"
+    local validation_error
+
+    if validation_error="$(awk -v start="${body_start}" -v max_tools="${max_tools}" '
+        function fail(message) {
+            print message
+            failed = 1
+            exit 1
+        }
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+        NR < start { next }
+        {
+            line = $0
+            if (line ~ /^[[:space:]]*$/ || line ~ /^[[:space:]]*#/) {
+                next
+            }
+            if (line ~ /^[[:space:]]*aliases:[[:space:]]*(#.*)?$/) {
+                if (aliases_seen) {
+                    fail("正文只能包含一个 aliases: 声明。")
+                }
+                aliases_seen = 1
+                next
+            }
+            if (!aliases_seen) {
+                fail("正文第一个有效行必须是 aliases:。")
+            }
+
+            sub(/[[:space:]]*#.*/, "", line)
+            count = split(line, entries, ",")
+            for (i = 1; i <= count; i++) {
+                entry = trim(entries[i])
+                if (entry == "") {
+                    continue
+                }
+                equal_at = index(entry, "=")
+                if (equal_at <= 1) {
+                    fail("aliases 条目必须使用 NAME=PIN 格式: " entry)
+                }
+                alias_name = trim(substr(entry, 1, equal_at - 1))
+                if (alias_name !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+                    fail("非法 alias 名称: " alias_name)
+                }
+                if (alias_name in seen) {
+                    fail("重复 alias: " alias_name)
+                }
+                seen[alias_name] = 1
+            }
+        }
+        END {
+            if (failed) {
+                exit 1
+            }
+            if (!aliases_seen) {
+                fail("正文缺少 aliases: 声明。")
+            }
+            for (i = 0; i < max_tools; i++) {
+                heater = "T" i "H"
+                sensor = "T" i "S"
+                if (!(heater in seen)) {
+                    fail("缺少必需 alias: " heater)
+                }
+                if (!(sensor in seen)) {
+                    fail("缺少必需 alias: " sensor)
+                }
+            }
+            for (alias_name in seen) {
+                if (alias_name ~ /^T[0-9]+[HS]$/) {
+                    tool = alias_name
+                    sub(/^T/, "", tool)
+                    sub(/[HS]$/, "", tool)
+                    suffix = substr(alias_name, length(alias_name), 1)
+                    canonical = "T" (tool + 0) suffix
+                    if (alias_name != canonical) {
+                        fail("工具 alias 必须使用规范编号: " alias_name)
+                    }
+                    if ((tool + 0) >= max_tools) {
+                        fail("alias 超出 max_tools 范围: " alias_name)
+                    }
+                }
+            }
+        }
+    ' "${file}")"; then
+        return
+    fi
+    profile_error "${file}" "${validation_error:-aliases 正文校验失败。}"
+}
+
+function validate_macro_name {
+    local file="${1}"
+    local field="${2}"
+    local value="${3}"
+    local normalized="${3,,}"
+
+    case "${value}" in
+        ""|[0-9]*|*[!A-Za-z0-9_]*)
+            profile_error "${file}" "字段 ${field} 必须是合法的 G-Code 宏名称。"
+            ;;
+    esac
+    case "${normalized}" in
+        multitool_release_tool|multitool_pickup_tool)
+            profile_error "${file}" "字段 ${field} 不能使用公共钩子宏名称 ${value}。"
+            ;;
+    esac
+}
+
+function validate_toolchange_profile_body {
+    local file="${1}"
+    local body_start="${2}"
+    local release_macro="${3}"
+    local pickup_macro="${4}"
+    local validation_error
+
+    if validation_error="$(awk \
+            -v start="${body_start}" \
+            -v release_macro="${release_macro}" \
+            -v pickup_macro="${pickup_macro}" '
+        function fail(message) {
+            print message
+            failed = 1
+            exit 1
+        }
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+        NR < start { next }
+        {
+            line = $0
+            stripped = trim(line)
+
+            if (index(stripped, "# BEGIN MULTITOOL_TOOL_TEMPLATE") > 0 &&
+                    stripped != "# BEGIN MULTITOOL_TOOL_TEMPLATE") {
+                fail("工具重复块开始标记必须独占一行。")
+            }
+            if (index(stripped, "# END MULTITOOL_TOOL_TEMPLATE") > 0 &&
+                    stripped != "# END MULTITOOL_TOOL_TEMPLATE") {
+                fail("工具重复块结束标记必须独占一行。")
+            }
+            if (stripped == "# BEGIN MULTITOOL_TOOL_TEMPLATE") {
+                if (repeat_started) {
+                    fail("工具重复块只能出现一次。")
+                }
+                repeat_started = 1
+                in_repeat = 1
+                next
+            }
+            if (stripped == "# END MULTITOOL_TOOL_TEMPLATE") {
+                if (!in_repeat || repeat_ended) {
+                    fail("工具重复块结束标记没有匹配的开始标记。")
+                }
+                repeat_ended = 1
+                in_repeat = 0
+                next
+            }
+            if (index(line, "@@TOOL@@") > 0) {
+                if (!in_repeat) {
+                    fail("@@TOOL@@ 只能出现在工具重复块内。")
+                }
+                repeat_has_token = 1
+            }
+
+            if (stripped == "[gcode_macro " release_macro "]") {
+                if (in_repeat) {
+                    fail("release_macro 不能定义在工具重复块内。")
+                }
+                release_count++
+            }
+            if (stripped == "[gcode_macro " pickup_macro "]") {
+                if (in_repeat) {
+                    fail("pickup_macro 不能定义在工具重复块内。")
+                }
+                pickup_count++
+            }
+            lowered = tolower(stripped)
+            if (lowered == "[gcode_macro multitool_release_tool]" ||
+                    lowered == "[gcode_macro multitool_pickup_tool]") {
+                fail("方案正文不能重新定义公共换头钩子。")
+            }
+        }
+        END {
+            if (failed) {
+                exit 1
+            }
+            if (in_repeat || repeat_started != repeat_ended) {
+                fail("工具重复块标记不完整。")
+            }
+            if (repeat_started && !repeat_has_token) {
+                fail("工具重复块中缺少 @@TOOL@@。")
+            }
+            if (release_count != 1) {
+                fail("正文必须恰好定义一次 [gcode_macro " release_macro "]。")
+            }
+            if (pickup_count != 1) {
+                fail("正文必须恰好定义一次 [gcode_macro " pickup_macro "]。")
+            }
+        }
+    ' "${file}")"; then
+        return
+    fi
+    profile_error "${file}" "${validation_error:-换头方案正文校验失败。}"
+}
+
+function parse_profile {
+    local profile_type="${1}"
+    local file="${2}"
+    local line key value
+    local line_number=0
+    local in_body=0
+
+    reset_profile_values
+    validate_profile_text_file "${file}"
+
+    while IFS= read -r line || [ -n "${line}" ]; do
+        line_number=$((line_number + 1))
+        if [ "${in_body}" -eq 1 ]; then
+            [ "${line}" != "---" ] || profile_error "${file}" "只能包含一个 --- 分隔行。"
+            PROFILE_BODY_LINE_COUNT=$((PROFILE_BODY_LINE_COUNT + 1))
+            continue
+        fi
+
+        case "${line}" in
+            ""|\#*) continue ;;
+            ---)
+                in_body=1
+                PROFILE_BODY_START=$((line_number + 1))
+                continue
+                ;;
+            *=*) ;;
+            *) profile_error "${file}" "第 ${line_number} 行必须是 key=value、注释或 ---。" ;;
+        esac
+
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "${key}" in
+            [a-z_]* ) ;;
+            *) profile_error "${file}" "第 ${line_number} 行包含非法字段名: ${key}" ;;
+        esac
+        case "${key}" in
+            *[!a-z0-9_]*) profile_error "${file}" "第 ${line_number} 行包含非法字段名: ${key}" ;;
+        esac
+        validate_profile_metadata_value "${file}" "${key}" "${value}"
+
+        case "${key}" in
+            format_version)
+                [ -z "${PROFILE_FORMAT_VERSION}" ] || profile_error "${file}" "字段 format_version 重复。"
+                PROFILE_FORMAT_VERSION="${value}"
+                ;;
+            name)
+                [ -z "${PROFILE_NAME}" ] || profile_error "${file}" "字段 name 重复。"
+                PROFILE_NAME="${value}"
+                ;;
+            completion_note)
+                PROFILE_COMPLETION_NOTES+=("${value}")
+                ;;
+            max_tools)
+                [ "${profile_type}" = "board" ] || profile_error "${file}" "换头方案不支持字段 max_tools。"
+                [ -z "${PROFILE_MAX_TOOLS}" ] || profile_error "${file}" "字段 max_tools 重复。"
+                PROFILE_MAX_TOOLS="${value}"
+                ;;
+            config_note)
+                [ "${profile_type}" = "board" ] || profile_error "${file}" "换头方案不支持字段 config_note。"
+                [ -z "${PROFILE_CONFIG_NOTE}" ] || profile_error "${file}" "字段 config_note 重复。"
+                PROFILE_CONFIG_NOTE="${value}"
+                ;;
+            generate_note)
+                [ "${profile_type}" = "board" ] || profile_error "${file}" "换头方案不支持字段 generate_note。"
+                PROFILE_GENERATE_NOTES+=("${value}")
+                ;;
+            description)
+                [ "${profile_type}" = "toolchange" ] || profile_error "${file}" "PCB profile 不支持字段 description。"
+                [ -z "${PROFILE_DESCRIPTION}" ] || profile_error "${file}" "字段 description 重复。"
+                PROFILE_DESCRIPTION="${value}"
+                ;;
+            hardware_mode)
+                [ "${profile_type}" = "toolchange" ] || profile_error "${file}" "PCB profile 不支持字段 hardware_mode。"
+                [ -z "${PROFILE_HARDWARE_MODE}" ] || profile_error "${file}" "字段 hardware_mode 重复。"
+                PROFILE_HARDWARE_MODE="${value}"
+                ;;
+            release_macro)
+                [ "${profile_type}" = "toolchange" ] || profile_error "${file}" "PCB profile 不支持字段 release_macro。"
+                [ -z "${PROFILE_RELEASE_MACRO}" ] || profile_error "${file}" "字段 release_macro 重复。"
+                PROFILE_RELEASE_MACRO="${value}"
+                ;;
+            pickup_macro)
+                [ "${profile_type}" = "toolchange" ] || profile_error "${file}" "PCB profile 不支持字段 pickup_macro。"
+                [ -z "${PROFILE_PICKUP_MACRO}" ] || profile_error "${file}" "字段 pickup_macro 重复。"
+                PROFILE_PICKUP_MACRO="${value}"
+                ;;
+            *) profile_error "${file}" "未知字段: ${key}" ;;
+        esac
+    done < "${file}"
+
+    [ "${in_body}" -eq 1 ] || profile_error "${file}" "缺少 --- 分隔行。"
+    [ "${PROFILE_BODY_LINE_COUNT}" -gt 0 ] || profile_error "${file}" "--- 后缺少正文。"
+    [ "${PROFILE_FORMAT_VERSION}" = "1" ] || profile_error "${file}" "format_version 必须为 1。"
+    [ -n "${PROFILE_NAME}" ] || profile_error "${file}" "缺少字段 name。"
+
+    case "${profile_type}" in
+        board)
+            case "${PROFILE_MAX_TOOLS}" in
+                [1-9]|1[0-6]) ;;
+                *) profile_error "${file}" "max_tools 必须是 1..16 的整数。" ;;
+            esac
+            [ -n "${PROFILE_CONFIG_NOTE}" ] || profile_error "${file}" "缺少字段 config_note。"
+            validate_board_profile_body "${file}" "${PROFILE_BODY_START}" "${PROFILE_MAX_TOOLS}"
+            ;;
+        toolchange)
+            [ -n "${PROFILE_DESCRIPTION}" ] || profile_error "${file}" "缺少字段 description。"
+            case "${PROFILE_HARDWARE_MODE}" in
+                prompt|shared_extruder|multi_toolhead) ;;
+                *) profile_error "${file}" "hardware_mode 必须为 prompt、shared_extruder 或 multi_toolhead。" ;;
+            esac
+            validate_macro_name "${file}" "release_macro" "${PROFILE_RELEASE_MACRO}"
+            validate_macro_name "${file}" "pickup_macro" "${PROFILE_PICKUP_MACRO}"
+            [ "${PROFILE_RELEASE_MACRO,,}" != "${PROFILE_PICKUP_MACRO,,}" ] \
+                || profile_error "${file}" "release_macro 与 pickup_macro 不能相同。"
+            validate_toolchange_profile_body \
+                "${file}" "${PROFILE_BODY_START}" \
+                "${PROFILE_RELEASE_MACRO}" "${PROFILE_PICKUP_MACRO}"
+            ;;
+        *) die "未知 profile 类型: ${profile_type}" ;;
+    esac
+}
+
+function find_profile_files {
+    local directory="${1}"
+    local label="${2}"
+    local restore_nullglob=0
+    local file base
+
+    DISCOVERED_PROFILE_FILES=()
+    [ -d "${directory}" ] || die "缺少 ${label} profile 目录: ${directory}"
+    [ ! -L "${directory}" ] || die "${label} profile 目录不能是符号链接: ${directory}"
+    [ -r "${directory}" ] || die "${label} profile 目录不可读: ${directory}"
+
+    if shopt -q nullglob; then
+        restore_nullglob=1
+    else
+        shopt -s nullglob
+    fi
+    DISCOVERED_PROFILE_FILES=("${directory}"/*.conf)
+    if [ "${restore_nullglob}" -eq 0 ]; then
+        shopt -u nullglob
+    fi
+
+    [ "${#DISCOVERED_PROFILE_FILES[@]}" -gt 0 ] || die "${label} profile 目录中没有 .conf 文件: ${directory}"
+    for file in "${DISCOVERED_PROFILE_FILES[@]}"; do
+        base="$(basename "${file}")"
+        case "${base}" in
+            *[!A-Za-z0-9._-]*) profile_error "${file}" "文件名只能包含字母、数字、点、下划线和连字符。" ;;
+        esac
+        [ -f "${file}" ] || profile_error "${file}" "不是普通文件。"
+        [ ! -L "${file}" ] || profile_error "${file}" "不允许使用符号链接。"
+        [ -r "${file}" ] || profile_error "${file}" "文件不可读。"
+    done
+}
+
+function discover_board_profiles {
+    local file existing_name
+
+    BOARD_PROFILE_FILES=()
+    BOARD_PROFILE_NAMES=()
+    BOARD_PROFILE_MAX_TOOLS=()
+    find_profile_files "${BOARD_PROFILE_DIR}" "PCB"
+    for file in "${DISCOVERED_PROFILE_FILES[@]}"; do
+        parse_profile board "${file}"
+        for existing_name in "${BOARD_PROFILE_NAMES[@]}"; do
+            [ "${existing_name}" != "${PROFILE_NAME}" ] \
+                || profile_error "${file}" "PCB 名称重复: ${PROFILE_NAME}"
+        done
+        BOARD_PROFILE_FILES+=("${file}")
+        BOARD_PROFILE_NAMES+=("${PROFILE_NAME}")
+        BOARD_PROFILE_MAX_TOOLS+=("${PROFILE_MAX_TOOLS}")
+    done
+}
+
+function discover_toolchange_profiles {
+    local file existing_name
+
+    TOOLCHANGE_PROFILE_FILES=()
+    TOOLCHANGE_PROFILE_NAMES=()
+    TOOLCHANGE_PROFILE_DESCRIPTIONS=()
+    find_profile_files "${TOOLCHANGE_PROFILE_DIR}" "换头方案"
+    for file in "${DISCOVERED_PROFILE_FILES[@]}"; do
+        parse_profile toolchange "${file}"
+        [ "${PROFILE_NAME}" != "自定义" ] || profile_error "${file}" "名称 自定义 由安装脚本保留。"
+        for existing_name in "${TOOLCHANGE_PROFILE_NAMES[@]}"; do
+            [ "${existing_name}" != "${PROFILE_NAME}" ] \
+                || profile_error "${file}" "换头方案名称重复: ${PROFILE_NAME}"
+        done
+        TOOLCHANGE_PROFILE_FILES+=("${file}")
+        TOOLCHANGE_PROFILE_NAMES+=("${PROFILE_NAME}")
+        TOOLCHANGE_PROFILE_DESCRIPTIONS+=("${PROFILE_DESCRIPTION}")
+    done
+}
+
+function prepare_profile_catalogs {
+    if [ "${INSTALL_MODE}" != "configure" ]; then
+        return
+    fi
+    discover_board_profiles
+    discover_toolchange_profiles
+}
+
+function select_board_profile_file {
+    local file="${1}"
+    local base
+
+    parse_profile board "${file}"
+    base="$(basename "${file}")"
+    MULTIHOTEND_BOARD="${base%.conf}"
+    MULTIHOTEND_BOARD_PROFILE="${file}"
+    MULTIHOTEND_BOARD_NAME="${PROFILE_NAME}"
+    MULTIHOTEND_BOARD_MAX_TOOLS="${PROFILE_MAX_TOOLS}"
+    MULTIHOTEND_BOARD_CONFIG_NOTE="${PROFILE_CONFIG_NOTE}"
+    MULTIHOTEND_BOARD_BODY_START="${PROFILE_BODY_START}"
+    MULTIHOTEND_BOARD_GENERATE_NOTES=("${PROFILE_GENERATE_NOTES[@]}")
+    MULTIHOTEND_BOARD_COMPLETION_NOTES=("${PROFILE_COMPLETION_NOTES[@]}")
+}
+
+function select_custom_toolchange_scheme {
+    TOOLCHANGE_SCHEME="custom"
+    TOOLCHANGE_PROFILE=""
+    TOOLCHANGE_NAME="自定义"
+    TOOLCHANGE_DESCRIPTION="自定义换头/换热端移动路径。"
+    TOOLCHANGE_PROFILE_HARDWARE_MODE="prompt"
+    TOOLCHANGE_RELEASE_MACRO=""
+    TOOLCHANGE_PICKUP_MACRO=""
+    TOOLCHANGE_BODY_START=""
+    TOOLCHANGE_COMPLETION_NOTES=()
+}
+
+function select_toolchange_profile_file {
+    local file="${1}"
+    local base
+
+    parse_profile toolchange "${file}"
+    base="$(basename "${file}")"
+    TOOLCHANGE_SCHEME="${base%.conf}"
+    TOOLCHANGE_PROFILE="${file}"
+    TOOLCHANGE_NAME="${PROFILE_NAME}"
+    TOOLCHANGE_DESCRIPTION="${PROFILE_DESCRIPTION}"
+    TOOLCHANGE_PROFILE_HARDWARE_MODE="${PROFILE_HARDWARE_MODE}"
+    TOOLCHANGE_RELEASE_MACRO="${PROFILE_RELEASE_MACRO}"
+    TOOLCHANGE_PICKUP_MACRO="${PROFILE_PICKUP_MACRO}"
+    TOOLCHANGE_BODY_START="${PROFILE_BODY_START}"
+    TOOLCHANGE_COMPLETION_NOTES=("${PROFILE_COMPLETION_NOTES[@]}")
+}
+
+function emit_profile_body {
+    local file="${1}"
+    local body_start="${2}"
+    tail -n "+${body_start}" -- "${file}"
 }
 
 function ask_frontend_choice {
@@ -585,6 +1128,9 @@ function activate_staged_config {
     [ -d "${staging}" ] || die "配置暂存目录不存在: ${staging}"
     [ -f "${staging}/multitool_config.cfg" ] || die "暂存配置缺少 multitool_config.cfg。"
     [ -f "${staging}/multihotend.cfg" ] || die "暂存配置缺少 multihotend.cfg。"
+    if [ -n "${TOOLCHANGE_PROFILE}" ]; then
+        [ -f "${staging}/change_tool.cfg" ] || die "暂存配置缺少 change_tool.cfg。"
+    fi
 
     if [ -e "${target}" ] || [ -L "${target}" ]; then
         backup_root="$(mktemp -d "${CONFIG_PATH}/${CONFIG_SUBDIR}.backup.XXXXXX")" \
@@ -740,83 +1286,73 @@ EOF
 }
 
 function ask_multihotend_board {
-    local answer
-    while true; do
-        cat <<EOF
-请选择多热端扩展板：
-  1) 通用自定义多热端板（最多 8 个热端，默认）
-  2) LSP CAN_XII（最多 12 个热端）
+    local answer answer_number index count i default_label
 
-EOF
-        printf "请输入选项 [1/2，默认 1]: "
+    if [ "${#BOARD_PROFILE_FILES[@]}" -eq 0 ]; then
+        discover_board_profiles
+    fi
+    count="${#BOARD_PROFILE_FILES[@]}"
+
+    while true; do
+        printf "请选择多热端扩展板：\n"
+        for ((i = 0; i < count; i++)); do
+            default_label=""
+            if [ "${i}" -eq 0 ]; then
+                default_label="，默认"
+            fi
+            printf "  %d) %s（最多 %s 个热端%s）\n" \
+                "$((i + 1))" "${BOARD_PROFILE_NAMES[i]}" \
+                "${BOARD_PROFILE_MAX_TOOLS[i]}" "${default_label}"
+        done
+        printf "\n请输入选项 [1-%d，默认 1]: " "${count}"
         read_answer answer
+        if [ -z "${answer}" ]; then
+            select_board_profile_file "${BOARD_PROFILE_FILES[0]}"
+            return
+        fi
         case "${answer}" in
-            ""|1)
-                MULTIHOTEND_BOARD="generic"
-                return
+            *[!0-9]*)
+                echo "输入无效，请输入 1..${count}。"
+                continue
                 ;;
-            2)
-                MULTIHOTEND_BOARD="lsp_can_xii"
-                return
-                ;;
-            *) echo "输入无效，请输入 1 或 2。" ;;
         esac
+        if [ "${#answer}" -gt 6 ]; then
+            echo "输入无效，请输入 1..${count}。"
+            continue
+        fi
+        answer_number=$((10#${answer}))
+        if [ "${answer_number}" -ge 1 ] && [ "${answer_number}" -le "${count}" ]; then
+            index=$((answer_number - 1))
+            select_board_profile_file "${BOARD_PROFILE_FILES[index]}"
+            return
+        fi
+        echo "输入无效，请输入 1..${count}。"
     done
 }
 
 function multihotend_board_name {
-    case "${MULTIHOTEND_BOARD}" in
-        generic) printf "通用自定义多热端板\n" ;;
-        lsp_can_xii) printf "LSP CAN_XII\n" ;;
-        *) die "未知多热端扩展板: ${MULTIHOTEND_BOARD}" ;;
-    esac
+    [ -n "${MULTIHOTEND_BOARD_NAME}" ] || die "尚未选择多热端扩展板。"
+    printf "%s\n" "${MULTIHOTEND_BOARD_NAME}"
 }
 
 function multihotend_board_max_tools {
-    case "${MULTIHOTEND_BOARD}" in
-        generic) printf "8\n" ;;
-        lsp_can_xii) printf "12\n" ;;
-        *) die "未知多热端扩展板: ${MULTIHOTEND_BOARD}" ;;
-    esac
+    [ -n "${MULTIHOTEND_BOARD_MAX_TOOLS}" ] || die "尚未选择多热端扩展板。"
+    printf "%s\n" "${MULTIHOTEND_BOARD_MAX_TOOLS}"
+}
+
+function multihotend_default_tool_count {
+    local board_max="${1}"
+    if [ "${board_max}" -lt 4 ]; then
+        printf "%s\n" "${board_max}"
+    else
+        printf "4\n"
+    fi
 }
 
 function emit_multihotend_board_aliases {
-    case "${MULTIHOTEND_BOARD}" in
-        generic)
-            cat <<'EOF'
-aliases:                                            # 【必改】填写等号后的真实 MCU 引脚；别名名称保持不变
-    T7H=,T7S=,IO7=,
-    T6H=,T6S=,IO6=,
-    T5H=,T5S=,IO5=,
-    T4H=,T4S=,IO4=,
-    T3H=,T3S=,IO3=,
-    T2H=,T2S=,IO2=,
-    T1H=,T1S=,IO1=,
-    T0H=,T0S=,IO0=
-EOF
-            ;;
-        lsp_can_xii)
-            cat <<'EOF'
-aliases:                                            # LSP CAN_XII 固定引脚映射；别名可直接使用
-    T11H=PB7,T11S=PA0,IO11=PC15,
-    T10H=PB6,T10S=PA1,IO10=PC14,
-    T9H=PB5,T9S=PA2,IO9=PC13,
-    T8H=PB4,T8S=PA3,IO8=PC0,
-    T7H=PB3,T7S=PA4,IO7=PC1,
-    T6H=PC6,T6S=PA5,IO6=PC2,
-    T5H=PC7,T5S=PA6,IO5=PC3,
-    T4H=PC8,T4S=PA7,IO4=PD2,
-    T3H=PC9,T3S=PC4,IO3=PC12,
-    T2H=PA8,T2S=PC5,IO2=PC11,
-    T1H=PA9,T1S=PB0,IO1=PC10,
-    T0H=PA10,T0S=PB1,IO0=PA15,
-    FAN0=PB10,FAN1=PB2,RGB=PB11
-EOF
-            ;;
-        *)
-            die "未知多热端扩展板: ${MULTIHOTEND_BOARD}"
-            ;;
-    esac
+    [ -n "${MULTIHOTEND_BOARD_PROFILE}" ] || die "尚未选择多热端扩展板。"
+    emit_profile_body "${MULTIHOTEND_BOARD_PROFILE}" "${MULTIHOTEND_BOARD_BODY_START}" \
+        || die "读取 PCB profile 正文失败: ${MULTIHOTEND_BOARD_PROFILE}"
 }
 
 function emit_full_extruder_section {
@@ -891,17 +1427,19 @@ EOF
 
 function generate_multihotend_config {
     local target_dir target_file
-    local tool_count board_max board_name board_config_note heaters i name
+    local tool_count board_max default_tool_count board_name board_config_note heaters i name note
 
     target_dir="$(config_work_path)"
     target_file="${target_dir}/multihotend.cfg"
-    if [ -z "${MULTIHOTEND_BOARD}" ]; then
+    if [ -z "${MULTIHOTEND_BOARD_PROFILE}" ]; then
         ask_multihotend_board
     fi
     board_max="$(multihotend_board_max_tools)"
+    default_tool_count="$(multihotend_default_tool_count "${board_max}")"
     board_name="$(multihotend_board_name)"
+    board_config_note="${MULTIHOTEND_BOARD_CONFIG_NOTE}"
     if [ -z "${MULTIHOTEND_TOOL_COUNT}" ]; then
-        MULTIHOTEND_TOOL_COUNT="$(prompt_int_default "请输入热端数量 [1-${board_max}，默认 4]: " 4 1 "${board_max}")"
+        MULTIHOTEND_TOOL_COUNT="$(prompt_int_default "请输入热端数量 [1-${board_max}，默认 ${default_tool_count}]: " "${default_tool_count}" 1 "${board_max}")"
     fi
     case "${MULTIHOTEND_TOOL_COUNT}" in
         *[!0-9]*|"") die "热端数量必须是 1..${board_max} 之间的数字。" ;;
@@ -930,12 +1468,6 @@ function generate_multihotend_config {
         DOCK_FAN_MODE="$(ask_dock_fan_mode)"
     fi
     heaters="$(extruder_list "${tool_count}")"
-
-    if [ "${MULTIHOTEND_BOARD}" = "lsp_can_xii" ]; then
-        board_config_note="请替换所有 TODO_* 占位；LSP CAN_XII 的 board_pins aliases 已固定，无需修改。"
-    else
-        board_config_note="请替换所有 TODO_* 占位，并填写 [board_pins multihotend] 中等号后的真实 MCU 引脚。"
-    fi
 
     {
         cat <<EOF
@@ -1045,12 +1577,9 @@ EOF
     } > "${target_file}" || die "生成 multihotend.cfg 失败: ${target_file}"
 
     echo "  -> 已生成 multihotend.cfg"
-    if [ "${MULTIHOTEND_BOARD}" = "lsp_can_xii" ]; then
-        echo "     LSP CAN_XII 引脚别名已写入；FAN0、FAN1、RGB 仅预留，当前配置未使用。"
-        echo "     请填写 canbus_uuid、风扇、挤出机等其余 TODO_* 字段后再使用。"
-    else
-        echo "     请填写所有 TODO_* 字段，以及 [board_pins multihotend] 中等号后的真实 MCU 引脚后再使用。"
-    fi
+    for note in "${MULTIHOTEND_BOARD_GENERATE_NOTES[@]}"; do
+        printf "     %s\n" "${note}"
+    done
     if [ "${TOOL_HARDWARE_MODE}" = "multi_toolhead" ]; then
         echo "     多工具头模式请在 multitool_config.cfg 中确认 sync_extruder_motion: False。"
     fi
@@ -1177,99 +1706,6 @@ function patch_calibration_tool_count {
     esac
 }
 
-function patch_cxchanger_config_tool_count {
-    local count="${1}"
-    local cfg
-    local tmp_cfg
-
-    cfg="$(config_work_path)/change_tool.cfg"
-
-    [ -f "${cfg}" ] || {
-        echo "[CONFIG] 未找到 change_tool.cfg，无法自动调整 CxChanger dock 坐标变量。"
-        return
-    }
-
-    tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 change_tool.cfg 临时文件失败。"
-    local awk_status
-    if awk -v count="${count}" '
-        function trim(s) {
-            sub(/^[[:space:]]+/, "", s)
-            sub(/[[:space:]]+$/, "", s)
-            return s
-        }
-        function emit_docks(    i, xkey, ykey, xval, yval) {
-            for (i = 0; i < count; i++) {
-                xkey = "variable_t" i "_dock_x"
-                ykey = "variable_t" i "_dock_y"
-                xval = (xkey in values) ? values[xkey] : "0"
-                yval = (ykey in values) ? values[ykey] : "0"
-                printf "%s: %s               # 【必改】T%d 停靠坞 X 坐标\n", xkey, xval, i
-                printf "%s: %s               # 【必改】T%d 停靠坞 Y 坐标\n", ykey, yval, i
-            }
-        }
-        NR == FNR {
-            if ($0 ~ /^[[:space:]]*variable_t[0-9]+_dock_[xy][[:space:]]*:/) {
-                line = $0
-                sub(/#.*/, "", line)
-                split(line, parts, ":")
-                key = trim(parts[1])
-                value = substr(line, index(line, ":") + 1)
-                values[key] = trim(value)
-            }
-            next
-        }
-        /^[[:space:]]*variable_t[0-9]+_dock_[xy][[:space:]]*:/ {
-            if (in_docks) {
-                next
-            }
-        }
-        /各热端停靠坞坐标/ {
-            print
-            in_docks = 1
-            emit_docks()
-            changed = 1
-            next
-        }
-        in_docks && /^[[:space:]]*$/ {
-            print
-            in_docks = 0
-            next
-        }
-        in_docks && /^[[:space:]]*gcode:/ {
-            print ""
-            print
-            in_docks = 0
-            next
-        }
-        !in_docks {
-            print
-        }
-        END {
-            if (!changed) {
-                exit 2
-            }
-        }
-    ' "${cfg}" "${cfg}" > "${tmp_cfg}"; then
-        awk_status=0
-    else
-        awk_status=$?
-    fi
-    case "${awk_status}" in
-        0)
-            mv "${tmp_cfg}" "${cfg}" || die "写入 change_tool.cfg 失败: ${cfg}"
-            echo "[CONFIG] 已调整 CxChanger change_tool.cfg dock 坐标变量数量为 ${count}"
-            ;;
-        2)
-            rm -f "${tmp_cfg}"
-            echo "[CONFIG] 未在 change_tool.cfg 中找到 CxChanger dock 坐标变量区域，请手动补齐 t0..t$((count - 1))。"
-            ;;
-        *)
-            rm -f "${tmp_cfg}"
-            die "调整 CxChanger change_tool.cfg dock 坐标变量失败。"
-            ;;
-    esac
-}
-
 function patch_generated_tool_count_configs {
     local count="${MULTIHOTEND_TOOL_COUNT}"
     if [ -z "${count}" ]; then
@@ -1277,27 +1713,47 @@ function patch_generated_tool_count_configs {
     fi
     patch_multitool_config_tool_count "${count}"
     patch_calibration_tool_count "${count}"
-    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
-        patch_cxchanger_config_tool_count "${count}"
-    fi
 }
 
 function ask_toolchange_scheme {
-    local answer
-    while true; do
-        cat <<EOF
-请选择换头方案：
-  0) 自定义：自定义换头/换热端移动路径。
-  1) CxChanger：https://github.com/cx330-TXY/CxChanger
+    local answer answer_number index count i
 
-EOF
-        printf "请输入 0 或 1 [默认 0]: "
+    if [ "${#TOOLCHANGE_PROFILE_FILES[@]}" -eq 0 ]; then
+        discover_toolchange_profiles
+    fi
+    count="${#TOOLCHANGE_PROFILE_FILES[@]}"
+
+    while true; do
+        printf "请选择换头方案：\n"
+        printf "  0) 自定义：自定义换头/换热端移动路径。（默认）\n"
+        for ((i = 0; i < count; i++)); do
+            printf "  %d) %s：%s\n" \
+                "$((i + 1))" "${TOOLCHANGE_PROFILE_NAMES[i]}" \
+                "${TOOLCHANGE_PROFILE_DESCRIPTIONS[i]}"
+        done
+        printf "\n请输入选项 [0-%d，默认 0]: " "${count}"
         read_answer answer
+        if [ -z "${answer}" ] || [ "${answer}" = "0" ]; then
+            select_custom_toolchange_scheme
+            return
+        fi
         case "${answer}" in
-            ""|0) TOOLCHANGE_SCHEME="custom"; return ;;
-            1) TOOLCHANGE_SCHEME="cxchanger"; return ;;
-            *) echo "输入无效，请输入 0 或 1。" ;;
+            *[!0-9]*)
+                echo "输入无效，请输入 0..${count}。"
+                continue
+                ;;
         esac
+        if [ "${#answer}" -gt 6 ]; then
+            echo "输入无效，请输入 0..${count}。"
+            continue
+        fi
+        answer_number=$((10#${answer}))
+        if [ "${answer_number}" -ge 1 ] && [ "${answer_number}" -le "${count}" ]; then
+            index=$((answer_number - 1))
+            select_toolchange_profile_file "${TOOLCHANGE_PROFILE_FILES[index]}"
+            return
+        fi
+        echo "输入无效，请输入 0..${count}。"
     done
 }
 
@@ -1335,19 +1791,20 @@ EOF
 }
 
 function ask_multihotend_generation_options {
-    local board_max
+    local board_max default_tool_count
 
-    if [ -z "${MULTIHOTEND_BOARD}" ]; then
+    if [ -z "${MULTIHOTEND_BOARD_PROFILE}" ]; then
         ask_multihotend_board
     fi
     board_max="$(multihotend_board_max_tools)"
-    MULTIHOTEND_TOOL_COUNT="$(prompt_int_default "请输入热端数量 [1-${board_max}，默认 4]: " 4 1 "${board_max}")"
+    default_tool_count="$(multihotend_default_tool_count "${board_max}")"
+    MULTIHOTEND_TOOL_COUNT="$(prompt_int_default "请输入热端数量 [1-${board_max}，默认 ${default_tool_count}]: " "${default_tool_count}" 1 "${board_max}")"
 
-    if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
-        TOOL_HARDWARE_MODE="shared_extruder"
-    else
-        TOOL_HARDWARE_MODE="$(ask_tool_hardware_mode)"
-    fi
+    case "${TOOLCHANGE_PROFILE_HARDWARE_MODE}" in
+        prompt) TOOL_HARDWARE_MODE="$(ask_tool_hardware_mode)" ;;
+        shared_extruder|multi_toolhead) TOOL_HARDWARE_MODE="${TOOLCHANGE_PROFILE_HARDWARE_MODE}" ;;
+        *) die "换头方案 ${TOOLCHANGE_NAME} 包含未知硬件模式: ${TOOLCHANGE_PROFILE_HARDWARE_MODE}" ;;
+    esac
 
     if [ "${TOOL_HARDWARE_MODE}" = "multi_toolhead" ]; then
         DOCK_FAN_MODE="per_tool"
@@ -1356,51 +1813,110 @@ function ask_multihotend_generation_options {
     fi
 }
 
-function install_cxchanger_config {
+function install_toolchange_config {
     local target_dir target_file
-    local source_file="${INSTALL_PATH}/schemes/CxChanger/change_tool.cfg"
+
+    if [ -z "${TOOLCHANGE_PROFILE}" ]; then
+        return
+    fi
+    [ -n "${MULTIHOTEND_TOOL_COUNT}" ] || die "生成换头方案配置前必须先设置热端数量。"
 
     target_dir="$(config_work_path)"
     target_file="${target_dir}/change_tool.cfg"
-
-    [ -f "${source_file}" ] || die "缺少 CxChanger 换头模板: ${source_file}"
     if [ -f "${target_file}" ]; then
         echo "[CONFIG] change_tool.cfg 已存在，跳过复制（保留用户修改）"
         return
     fi
-    cp "${source_file}" "${target_file}" || die "复制 change_tool.cfg 失败: ${source_file} -> ${target_file}"
-    echo "[CONFIG] 已复制 CxChanger change_tool.cfg"
+    mkdir -p "${target_dir}" || die "无法创建配置目录: ${target_dir}"
+    [ -w "${target_dir}" ] || die "当前用户无权写入配置目录: ${target_dir}"
+
+    if ! awk \
+            -v start="${TOOLCHANGE_BODY_START}" \
+            -v tool_count="${MULTIHOTEND_TOOL_COUNT}" '
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+        function emit_tool_block(    tool, line_number, rendered) {
+            for (tool = 0; tool < tool_count; tool++) {
+                for (line_number = 1; line_number <= block_size; line_number++) {
+                    rendered = block[line_number]
+                    gsub(/@@TOOL@@/, tool, rendered)
+                    print rendered
+                }
+            }
+        }
+        NR < start { next }
+        {
+            stripped = trim($0)
+            if (stripped == "# BEGIN MULTITOOL_TOOL_TEMPLATE") {
+                in_repeat = 1
+                block_size = 0
+                next
+            }
+            if (stripped == "# END MULTITOOL_TOOL_TEMPLATE") {
+                emit_tool_block()
+                in_repeat = 0
+                next
+            }
+            if (in_repeat) {
+                block[++block_size] = $0
+                next
+            }
+            print
+        }
+        END {
+            if (in_repeat) {
+                exit 2
+            }
+        }
+    ' "${TOOLCHANGE_PROFILE}" > "${target_file}"; then
+        rm -f "${target_file}"
+        die "生成 ${TOOLCHANGE_NAME} change_tool.cfg 失败。"
+    fi
+    if grep -qF '@@TOOL@@' "${target_file}" \
+            || grep -qF '# BEGIN MULTITOOL_TOOL_TEMPLATE' "${target_file}" \
+            || grep -qF '# END MULTITOOL_TOOL_TEMPLATE' "${target_file}"; then
+        rm -f "${target_file}"
+        die "生成 ${TOOLCHANGE_NAME} change_tool.cfg 后仍有未展开的模板标记。"
+    fi
+    echo "[CONFIG] 已生成 ${TOOLCHANGE_NAME} change_tool.cfg"
 }
 
-function patch_multitool_hooks_for_cxchanger {
+function patch_multitool_hooks_for_scheme {
     local cfg
     local tmp_cfg
+    local release_count pickup_count
+
+    if [ -z "${TOOLCHANGE_PROFILE}" ]; then
+        return
+    fi
 
     cfg="$(config_work_path)/multitool_config.cfg"
 
-    if [ ! -f "${cfg}" ]; then
-        echo "[CONFIG] 未找到 multitool_config.cfg，无法自动调整 CxChanger 钩子。"
-        return
-    fi
-    if ! grep -q '^\[gcode_macro multitool_release_tool\]$' "${cfg}" \
-            || ! grep -q '^\[gcode_macro multitool_pickup_tool\]$' "${cfg}"; then
-        echo "[CONFIG] 未找到 multitool_release_tool / multitool_pickup_tool 宏，无法自动调整。"
-        echo "         请手动添加 _release_tool / _pickup_tool 转发钩子。"
-        return
-    fi
+    [ -f "${cfg}" ] || die "未找到 multitool_config.cfg，无法设置 ${TOOLCHANGE_NAME} 钩子。"
+    release_count="$(grep -c '^\[gcode_macro multitool_release_tool\]$' "${cfg}" || true)"
+    pickup_count="$(grep -c '^\[gcode_macro multitool_pickup_tool\]$' "${cfg}" || true)"
+    [ "${release_count}" -eq 1 ] \
+        || die "multitool_config.cfg 必须恰好包含一个 multitool_release_tool 宏。"
+    [ "${pickup_count}" -eq 1 ] \
+        || die "multitool_config.cfg 必须恰好包含一个 multitool_pickup_tool 宏。"
 
     tmp_cfg="$(mktemp "${cfg}.tmp.XXXXXX")" || die "创建 multitool_config.cfg 临时文件失败。"
-    awk '
+    awk \
+        -v release_macro="${TOOLCHANGE_RELEASE_MACRO}" \
+        -v pickup_macro="${TOOLCHANGE_PICKUP_MACRO}" '
         function emit_release() {
             print "[gcode_macro multitool_release_tool]"
             print "gcode:"
-            print "    _release_tool TOOL={params.TOOL}"
+            print "    " release_macro " TOOL={params.TOOL}"
             print ""
         }
         function emit_pickup() {
             print "[gcode_macro multitool_pickup_tool]"
             print "gcode:"
-            print "    _pickup_tool TOOL={params.TOOL}"
+            print "    " pickup_macro " TOOL={params.TOOL}"
             print ""
         }
         $0 == "[gcode_macro multitool_release_tool]" {
@@ -1421,10 +1937,10 @@ function patch_multitool_hooks_for_cxchanger {
         }
     ' "${cfg}" > "${tmp_cfg}" || {
         rm -f "${tmp_cfg}"
-        die "调整 CxChanger 钩子失败。"
+        die "调整 ${TOOLCHANGE_NAME} 钩子失败。"
     }
     mv "${tmp_cfg}" "${cfg}" || die "写入 multitool_config.cfg 失败: ${cfg}"
-    echo "[CONFIG] 已将 multitool_config.cfg 钩子调整为 CxChanger 方案"
+    echo "[CONFIG] 已将 multitool_config.cfg 钩子调整为 ${TOOLCHANGE_NAME} 方案"
 }
 
 function patch_printer_cfg {
@@ -1546,7 +2062,7 @@ EOF
 }
 
 function print_configure_completion {
-    local board_name
+    local board_name note next_step
     board_name="$(multihotend_board_name)"
 
     cat <<EOF
@@ -1555,6 +2071,7 @@ function print_configure_completion {
 
 扩展板：${board_name}
 热端数量：${MULTIHOTEND_TOOL_COUNT}
+换头方案：${TOOLCHANGE_NAME}
 
 全新配置已部署到：
     ${CONFIG_PATH}/${CONFIG_SUBDIR}/
@@ -1579,8 +2096,16 @@ printer.cfg 已检查以下 include：
        - 确认 [multitool] tool_count / z_hop / accel_swap 等参数
        - 多热端复用挤出机：保持 sync_extruder_motion: True
        - 多工具头独立挤出机：设置 sync_extruder_motion: False
-       - 自定义方案：实现 multitool_release_tool / multitool_pickup_tool
-       - CxChanger 方案：确认钩子已转发到 _release_tool / _pickup_tool
+EOF
+
+    if [ -z "${TOOLCHANGE_PROFILE}" ]; then
+        printf "       - 自定义方案：实现 multitool_release_tool / multitool_pickup_tool\n"
+    else
+        printf "       - %s 方案：确认公共钩子已转发到 %s / %s\n" \
+            "${TOOLCHANGE_NAME}" "${TOOLCHANGE_RELEASE_MACRO}" "${TOOLCHANGE_PICKUP_MACRO}"
+    fi
+
+    cat <<EOF
 
     2. 修改 ${CONFIG_PATH}/${CONFIG_SUBDIR}/multihotend.cfg：
        - canbus_uuid
@@ -1589,28 +2114,27 @@ printer.cfg 已检查以下 include：
        - rotation_distance / sensor_type 等挤出机参数
 EOF
 
-    if [ "${MULTIHOTEND_BOARD}" = "lsp_can_xii" ]; then
-        cat <<EOF
-       - LSP CAN_XII 的 T0..T11 / IO0..IO11 引脚别名已写入，无需修改
-       - FAN0、FAN1、RGB 已预留为别名，当前没有配置使用它们
-EOF
-    else
-        cat <<EOF
-       - 填写 board_pins aliases 中等号后的真实 MCU 引脚
-EOF
+    for note in "${MULTIHOTEND_BOARD_COMPLETION_NOTES[@]}"; do
+        printf "       - %s\n" "${note}"
+    done
+
+    next_step=3
+    if [ -n "${TOOLCHANGE_PROFILE}" ]; then
+        printf "\n    %d. 修改 %s/%s/change_tool.cfg：\n" \
+            "${next_step}" "${CONFIG_PATH}" "${CONFIG_SUBDIR}"
+        printf "       - 按 %s 模板中的注释完成方案参数配置\n" "${TOOLCHANGE_NAME}"
+        for note in "${TOOLCHANGE_COMPLETION_NOTES[@]}"; do
+            printf "       - %s\n" "${note}"
+        done
+        next_step=$((next_step + 1))
     fi
 
     cat <<EOF
 
-    3. 如果使用 CxChanger，请修改 ${CONFIG_PATH}/${CONFIG_SUBDIR}/change_tool.cfg
-       - 每个工具的 dock_x / dock_y
-       - dock_shift_x / dock_dodge_y / dock_safe_y
-       - feed_safe / feed_fast / feed_slow
-
-    4. 检查 printer.cfg 或其它主配置
+    ${next_step}. 检查 printer.cfg 或其它主配置
        - 确认包含：${INCLUDE_LINE}
 
-    5. 涡流对刀详细配置和使用说明
+    $((next_step + 1)). 涡流对刀详细配置和使用说明
        - https://demo.chengxg.top/pangxie/#/articles/eddy_calibration
 
     完整教程和配置参考：
@@ -1633,6 +2157,7 @@ EOF
 function run_install {
     preflight_checks
     sync_repo
+    prepare_profile_catalogs
 
     if [ "${INSTALL_MODE}" = "configure" ]; then
         ask_multihotend_board
@@ -1640,7 +2165,7 @@ function run_install {
         ask_toolchange_scheme
         ask_multihotend_generation_options
         DEPLOYED_CONFIG_FILES="${DEPLOYED_CONFIG_FILES} multihotend.cfg"
-        if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
+        if [ -n "${TOOLCHANGE_PROFILE}" ]; then
             DEPLOYED_CONFIG_FILES="${DEPLOYED_CONFIG_FILES} change_tool.cfg"
         fi
     else
@@ -1665,13 +2190,9 @@ function run_install {
         copy_config
         install_tool_calibration_config
         generate_multihotend_config
-        if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
-            install_cxchanger_config
-        fi
+        install_toolchange_config
         patch_generated_tool_count_configs
-        if [ "${TOOLCHANGE_SCHEME}" = "cxchanger" ]; then
-            patch_multitool_hooks_for_cxchanger
-        fi
+        patch_multitool_hooks_for_scheme
         activate_staged_config
         patch_printer_cfg
     fi
