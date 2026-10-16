@@ -196,6 +196,10 @@ class MultitoolFilament:
     def _on_button(self, eventtime, channel, state):
         loaded = bool(state)
         self._loaded[channel] = loaded
+        # MCU buttons may report their initial state before klippy:ready.
+        # Record it now; the ready-time seed reports and syncs all channels.
+        if self.printer.get_state_message()[1] != 'ready':
+            return
         action = '已装载' if loaded else '已卸载'
         self.gcode.run_script_from_command(
             "M118 通道%d，耗材%s" % (channel, action))
