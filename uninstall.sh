@@ -45,11 +45,19 @@ function require_command {
     fi
 }
 
-function preflight_checks {
-    if [ "${EUID}" -eq 0 ]; then
-        die "不要以 root 身份运行此脚本！请使用普通用户执行，脚本需要时会调用 sudo。"
-    fi
+function is_root {
+    [ "${EUID}" -eq 0 ]
+}
 
+function run_systemctl {
+    if is_root; then
+        systemctl "$@"
+    else
+        sudo systemctl "$@"
+    fi
+}
+
+function preflight_checks {
     require_command awk
     require_command readlink
     require_command rm
@@ -58,7 +66,9 @@ function preflight_checks {
     require_command cmp
 
     if [ "${SKIP_SERVICE_RESTART}" != "1" ]; then
-        require_command sudo "请先安装 sudo，或使用具备 sudo 权限的普通用户。"
+        if ! is_root; then
+            require_command sudo "请先安装 sudo，或使用具备 sudo 权限的普通用户。"
+        fi
         require_command systemctl "未检测到 systemctl，请确认这是 systemd 环境。"
     fi
 }
@@ -295,7 +305,7 @@ function restart_klipper {
 
     echo
     echo "[POST-UNINSTALL] 重启 Klipper 服务..."
-    sudo systemctl restart klipper || die "重启 klipper.service 失败，请运行 systemctl status klipper 查看原因。"
+    run_systemctl restart klipper || die "重启 klipper.service 失败，请运行 systemctl status klipper 查看原因。"
 }
 
 function restart_moonraker_if_needed {
@@ -307,28 +317,35 @@ function restart_moonraker_if_needed {
         return
     fi
 
-    if sudo systemctl list-units --full -all -t service --no-legend 2>/dev/null | grep -qE '(^| )moonraker(@|[-_.a-zA-Z0-9]*\.service|\.service)'; then
+    if run_systemctl list-units --full -all -t service --no-legend 2>/dev/null | grep -qE '(^| )moonraker(@|[-_.a-zA-Z0-9]*\.service|\.service)'; then
         echo
         echo "[POST-UNINSTALL] 重启 Moonraker 服务..."
-        sudo systemctl restart moonraker || die "重启 moonraker.service 失败，请运行 systemctl status moonraker 查看原因。"
+        run_systemctl restart moonraker || die "重启 moonraker.service 失败，请运行 systemctl status moonraker 查看原因。"
     else
         echo "[MOONRAKER] 未检测到 moonraker.service，已跳过服务重启。"
     fi
 }
 
-printf "\n=========================================\n"
-echo "- Klipper multitool-stats 后端卸载脚本 -"
-printf "=========================================\n\n"
+function main {
+    printf "\n=========================================\n"
+    echo "- Klipper multitool-stats 后端卸载脚本 -"
+    printf "=========================================\n\n"
 
-preflight_checks
-unlink_klipper_extras
-remove_calibration_plugins
-unlink_moonraker_components
-patch_moonraker_conf
-patch_printer_cfg
-remove_multitool_config_dir
-restart_klipper
-restart_moonraker_if_needed
+    preflight_checks
+    unlink_klipper_extras
+    remove_calibration_plugins
+    unlink_moonraker_components
+    patch_moonraker_conf
+    patch_printer_cfg
+    remove_multitool_config_dir
+    restart_klipper
+    restart_moonraker_if_needed
 
-echo
-echo "[DONE] 后端卸载完成。前端目录和前端 update_manager 配置未被修改。"
+    echo
+    echo "[DONE] 后端卸载完成。前端目录和前端 update_manager 配置未被修改。"
+}
+
+__script_source="${BASH_SOURCE:-${0}}"
+if [ "${__script_source}" = "${0}" ]; then
+    main "$@"
+fi

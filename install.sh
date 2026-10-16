@@ -118,6 +118,18 @@ function require_command {
     fi
 }
 
+function is_root {
+    [ "${EUID}" -eq 0 ]
+}
+
+function run_systemctl {
+    if is_root; then
+        systemctl "$@"
+    else
+        sudo systemctl "$@"
+    fi
+}
+
 function read_answer {
     local __var="${1}"
     local __answer=""
@@ -892,16 +904,14 @@ function download_url {
 }
 
 function preflight_checks {
-    if [ "$EUID" -eq 0 ]; then
-        die "不要以 root 身份运行此脚本！请使用普通用户执行，脚本需要时会调用 sudo。"
+    require_command git "请先通过系统的软件包管理器安装 git。"
+    if ! is_root; then
+        require_command sudo "请先安装 sudo，或使用具备 sudo 权限的普通用户。"
     fi
-
-    require_command git "请先安装 git，例如：sudo apt install git"
-    require_command sudo "请先安装 sudo，或使用具备 sudo 权限的普通用户。"
     require_command systemctl "未检测到 systemctl，请确认这是 systemd 环境。"
     require_command readlink
 
-    if sudo systemctl list-units --full -all -t service --no-legend 2>/dev/null | grep -qF 'klipper.service'; then
+    if run_systemctl list-units --full -all -t service --no-legend 2>/dev/null | grep -qF 'klipper.service'; then
         printf "[PRE-CHECK] 已检测到 Klipper 服务，继续...\n\n"
     else
         die "未找到 klipper.service，请先安装 Klipper，或确认服务名是否为 klipper.service。"
@@ -2018,16 +2028,16 @@ function patch_printer_cfg {
 
 function restart_klipper {
     echo "[POST-INSTALL] 重启 Klipper 服务..."
-    sudo systemctl restart klipper || die "重启 klipper.service 失败，请运行 systemctl status klipper 查看原因。"
+    run_systemctl restart klipper || die "重启 klipper.service 失败，请运行 systemctl status klipper 查看原因。"
 }
 
 function restart_moonraker_if_needed {
     if [ "${MOONRAKER_CONF_CHANGED}" -ne 1 ]; then
         return
     fi
-    if sudo systemctl list-units --full -all -t service --no-legend 2>/dev/null | grep -qE '(^| )moonraker(@|[-_.a-zA-Z0-9]*\.service|\.service)'; then
+    if run_systemctl list-units --full -all -t service --no-legend 2>/dev/null | grep -qE '(^| )moonraker(@|[-_.a-zA-Z0-9]*\.service|\.service)'; then
         echo "[POST-INSTALL] 重启 Moonraker 服务..."
-        sudo systemctl restart moonraker || die "重启 moonraker.service 失败，请运行 systemctl status moonraker 查看原因。"
+        run_systemctl restart moonraker || die "重启 moonraker.service 失败，请运行 systemctl status moonraker 查看原因。"
     else
         echo "[MOONRAKER] 未检测到 moonraker.service，已跳过服务重启。"
     fi
