@@ -7,6 +7,4 @@ local/
 .*/
 docs/
 tests/
-!tests/
-tests/*
 !README.md

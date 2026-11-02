@@ -54,8 +54,10 @@ TOOLCHANGE_BODY_START=""
 TOOLCHANGE_COMPLETION_NOTES=()
 FRONTEND_CHOICE=0
 FRONTEND_NAME=""
-FRONTEND_SOURCE_PATH=""
 FRONTEND_TARGET_PATH=""
+FRONTEND_DOWNLOAD_DIR=""
+FRONTEND_ARCHIVE_PATH=""
+MAINSAIL_RELEASE_URL="https://github.com/null01024/mainsail-multitool/releases/latest/download/mainsail.zip"
 MOONRAKER_COMPONENT_INSTALLED=0
 MOONRAKER_CONF_CHANGED=0
 TOOLS_CALIBRATE_URL="${TOOLS_CALIBRATE_URL:-https://raw.githubusercontent.com/viesturz/klipper-toolchanger/main/klipper/extras/tools_calibrate.py}"
@@ -70,7 +72,6 @@ CONFIG_FILES="multitool_config.cfg"
 DEPLOYED_CONFIG_FILES="${CONFIG_FILES}"
 CONFIG_WORK_PATH=""
 CONFIG_STAGING_PATH=""
-CONFIG_BACKUP_PATH=""
 
 set -eu
 export LC_ALL=C
@@ -93,9 +94,32 @@ function cleanup_config_staging {
     CONFIG_WORK_PATH=""
 }
 
+function cleanup_frontend_download {
+    local download_dir="${FRONTEND_DOWNLOAD_DIR:-}"
+
+    case "${download_dir}" in
+        "${TMPDIR:-/tmp}/multitool-mainsail."*)
+            rm -rf -- "${download_dir}"
+            ;;
+    esac
+    FRONTEND_DOWNLOAD_DIR=""
+    FRONTEND_ARCHIVE_PATH=""
+}
+
+function cleanup_install_staging {
+    cleanup_config_staging
+    cleanup_frontend_download
+}
+
+function register_install_cleanup {
+    trap cleanup_install_staging EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
 function die {
     printf "${RED}[ERROR] %s${RESET}\n" "$*" >&2
-    cleanup_config_staging
+    cleanup_install_staging
     exit 1
 }
 
@@ -815,12 +839,10 @@ function resolve_frontend_paths {
     case "${FRONTEND_CHOICE}" in
         0)
             FRONTEND_NAME=""
-            FRONTEND_SOURCE_PATH=""
             FRONTEND_TARGET_PATH=""
             ;;
         1)
             FRONTEND_NAME="Mainsail"
-            FRONTEND_SOURCE_PATH="${INSTALL_PATH}/mainsail"
             FRONTEND_TARGET_PATH="${HOME}/mainsail"
             ;;
         *)
@@ -830,27 +852,33 @@ function resolve_frontend_paths {
 }
 
 function validate_frontend_if_requested {
-    local source_real target_real target_parent
-
     resolve_frontend_paths
     if [ "${FRONTEND_CHOICE}" -eq 0 ]; then
         return
     fi
 
-    [ -d "${FRONTEND_SOURCE_PATH}" ] || die "本地 ${FRONTEND_NAME} 产物目录不存在: ${FRONTEND_SOURCE_PATH}"
-    [ -r "${FRONTEND_SOURCE_PATH}" ] || die "本地 ${FRONTEND_NAME} 产物目录不可读: ${FRONTEND_SOURCE_PATH}"
-    [ -f "${FRONTEND_SOURCE_PATH}/index.html" ] || die "本地 ${FRONTEND_NAME} 产物缺少 index.html: ${FRONTEND_SOURCE_PATH}"
-
     [ -d "${FRONTEND_TARGET_PATH}" ] || die "未检测到已安装的 ${FRONTEND_NAME}: ${FRONTEND_TARGET_PATH}。请先安装原版 ${FRONTEND_NAME}。"
     [ -f "${FRONTEND_TARGET_PATH}/index.html" ] || die "现有 ${FRONTEND_NAME} 目录缺少 index.html: ${FRONTEND_TARGET_PATH}"
+    [ -w "${FRONTEND_TARGET_PATH}" ] || die "当前用户无权写入前端目录: ${FRONTEND_TARGET_PATH}"
+    require_command unzip "请先通过系统的软件包管理器安装 unzip。"
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        die "未找到 curl 或 wget，无法下载 ${FRONTEND_NAME} 发布产物。"
+    fi
 
-    source_real="$(cd "${FRONTEND_SOURCE_PATH}" && pwd -P)"
-    target_real="$(cd "${FRONTEND_TARGET_PATH}" && pwd -P)"
-    [ "${source_real}" != "${target_real}" ] || die "本地产物目录不能与部署目录相同: ${source_real}"
+    register_install_cleanup
+    FRONTEND_DOWNLOAD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/multitool-mainsail.XXXXXX")" \
+        || die "无法创建 ${FRONTEND_NAME} 下载临时目录。"
+    FRONTEND_ARCHIVE_PATH="${FRONTEND_DOWNLOAD_DIR}/mainsail.zip"
 
-    target_parent="$(dirname "${FRONTEND_TARGET_PATH}")"
-    [ -w "${target_parent}" ] || die "当前用户无权写入前端父目录: ${target_parent}"
-    echo "[PRE-CHECK] ${FRONTEND_NAME} 本地产物和现有安装均有效。"
+    echo "[DOWNLOAD] ${FRONTEND_NAME} 最新正式版: ${MAINSAIL_RELEASE_URL}"
+    download_url "${MAINSAIL_RELEASE_URL}" "${FRONTEND_ARCHIVE_PATH}"
+    unzip -tq "${FRONTEND_ARCHIVE_PATH}" >/dev/null 2>&1 \
+        || die "${FRONTEND_NAME} 发布产物不是完整有效的 ZIP 文件。"
+    unzip -Z1 "${FRONTEND_ARCHIVE_PATH}" > "${FRONTEND_DOWNLOAD_DIR}/entries" \
+        || die "无法读取 ${FRONTEND_NAME} 发布产物目录。"
+    grep -qE '^(\./)?index\.html$' "${FRONTEND_DOWNLOAD_DIR}/entries" \
+        || die "${FRONTEND_NAME} 发布产物根目录缺少 index.html。"
+    echo "[PRE-CHECK] ${FRONTEND_NAME} 发布产物和现有安装均有效。"
 }
 
 function proxy_url {
@@ -1159,18 +1187,16 @@ function prepare_config_staging {
     [ -d "${CONFIG_PATH}" ] || die "未找到 Klipper 配置目录: ${CONFIG_PATH}"
     [ -w "${CONFIG_PATH}" ] || die "当前用户无权写入 Klipper 配置目录: ${CONFIG_PATH}"
 
+    register_install_cleanup
     CONFIG_STAGING_PATH="$(mktemp -d "${CONFIG_PATH}/.${CONFIG_SUBDIR}.install.XXXXXX")" \
         || die "创建配置暂存目录失败: ${CONFIG_PATH}"
     CONFIG_WORK_PATH="${CONFIG_STAGING_PATH}"
-    trap cleanup_config_staging EXIT
     echo "[CONFIG] 在暂存目录生成全新配置: ${CONFIG_STAGING_PATH}"
 }
 
 function activate_staged_config {
     local target="${CONFIG_PATH}/${CONFIG_SUBDIR}"
     local staging="${CONFIG_STAGING_PATH}"
-    local backup_root=""
-    local backup_path=""
 
     [ -n "${staging}" ] || die "配置暂存目录尚未创建。"
     [ -d "${staging}" ] || die "配置暂存目录不存在: ${staging}"
@@ -1181,34 +1207,13 @@ function activate_staged_config {
     fi
 
     if [ -e "${target}" ] || [ -L "${target}" ]; then
-        backup_root="$(mktemp -d "${CONFIG_PATH}/${CONFIG_SUBDIR}.backup.XXXXXX")" \
-            || die "创建配置备份目录失败: ${CONFIG_PATH}"
-        backup_path="${backup_root}/${CONFIG_SUBDIR}"
-        if ! mv "${target}" "${backup_path}"; then
-            rmdir "${backup_root}" 2>/dev/null || true
-            die "备份现有配置目录失败: ${target}"
-        fi
+        rm -rf -- "${target}" || die "移除旧配置目录失败: ${target}"
     fi
 
-    if ! mv "${staging}" "${target}"; then
-        if [ -n "${backup_path}" ]; then
-            if mv "${backup_path}" "${target}"; then
-                rmdir "${backup_root}" 2>/dev/null || true
-                die "激活新配置失败，已恢复原配置目录。"
-            fi
-            CONFIG_STAGING_PATH=""
-            CONFIG_WORK_PATH=""
-            die "激活新配置失败，且无法恢复原配置。旧配置位于 ${backup_path}，新配置位于 ${staging}。"
-        fi
-        die "激活新配置失败: ${target}"
-    fi
+    mv "${staging}" "${target}" || die "激活新配置失败: ${target}"
 
     CONFIG_STAGING_PATH=""
     CONFIG_WORK_PATH=""
-    CONFIG_BACKUP_PATH="${backup_path}"
-    if [ -n "${CONFIG_BACKUP_PATH}" ]; then
-        echo "[CONFIG] 原配置已备份到: ${CONFIG_BACKUP_PATH}"
-    fi
     echo "[CONFIG] 已启用全新配置目录: ${target}"
 }
 
@@ -2044,58 +2049,59 @@ function restart_moonraker_if_needed {
 }
 
 function install_frontend_if_requested {
-    local target_parent target_base staging backup
+    local entry
 
     if [ "${FRONTEND_CHOICE}" -eq 0 ]; then
         return
     fi
 
-    [ -f "${FRONTEND_SOURCE_PATH}/index.html" ] || die "本地 ${FRONTEND_NAME} 产物已失效: ${FRONTEND_SOURCE_PATH}"
+    [ -f "${FRONTEND_ARCHIVE_PATH}" ] || die "${FRONTEND_NAME} 发布产物已失效，请重新运行安装。"
     [ -f "${FRONTEND_TARGET_PATH}/index.html" ] || die "现有 ${FRONTEND_NAME} 安装已失效: ${FRONTEND_TARGET_PATH}"
 
-    target_parent="$(dirname "${FRONTEND_TARGET_PATH}")"
-    target_base="$(basename "${FRONTEND_TARGET_PATH}")"
-    staging="$(mktemp -d "${target_parent}/.${target_base}.install.XXXXXX")" || die "无法创建 ${FRONTEND_NAME} 暂存目录。"
-    backup="${target_parent}/.${target_base}.previous.$$"
-
-    if [ -e "${backup}" ] || [ -L "${backup}" ]; then
-        rm -rf -- "${staging}"
-        die "${FRONTEND_NAME} 备份目录已存在: ${backup}"
-    fi
-
-    echo "[POST-INSTALL] 从本地产物安装/更新 ${FRONTEND_NAME}: ${FRONTEND_SOURCE_PATH}"
-    if ! cp -a "${FRONTEND_SOURCE_PATH}/." "${staging}/"; then
-        rm -rf -- "${staging}"
-        die "复制 ${FRONTEND_NAME} 本地产物失败。"
-    fi
+    echo "[POST-INSTALL] 直接覆盖安装/更新 ${FRONTEND_NAME}: ${FRONTEND_TARGET_PATH}"
+    for entry in "${FRONTEND_TARGET_PATH}"/* "${FRONTEND_TARGET_PATH}"/.[!.]* "${FRONTEND_TARGET_PATH}"/..?*; do
+        [ -e "${entry}" ] || [ -L "${entry}" ] || continue
+        if [ "${entry}" = "${FRONTEND_TARGET_PATH}/config.json" ] && [ -f "${entry}" ]; then
+            continue
+        fi
+        rm -rf -- "${entry}" || die "移除 ${FRONTEND_NAME} 旧文件失败: ${entry}"
+    done
     if [ -f "${FRONTEND_TARGET_PATH}/config.json" ]; then
-        if ! cp "${FRONTEND_TARGET_PATH}/config.json" "${staging}/config.json"; then
-            rm -rf -- "${staging}"
-            die "保留 ${FRONTEND_NAME} config.json 失败。"
-        fi
+        unzip -oq "${FRONTEND_ARCHIVE_PATH}" -d "${FRONTEND_TARGET_PATH}" -x config.json ./config.json \
+            || die "覆盖安装 ${FRONTEND_NAME} 失败。"
         echo "[CONFIG] 已保留现有 ${FRONTEND_NAME} config.json"
-    fi
-    if [ ! -f "${staging}/index.html" ]; then
-        rm -rf -- "${staging}"
-        die "${FRONTEND_NAME} 暂存目录缺少 index.html。"
-    fi
-
-    if ! mv "${FRONTEND_TARGET_PATH}" "${backup}"; then
-        rm -rf -- "${staging}"
-        die "备份现有 ${FRONTEND_NAME} 目录失败: ${FRONTEND_TARGET_PATH}"
-    fi
-    if ! mv "${staging}" "${FRONTEND_TARGET_PATH}"; then
-        if ! mv "${backup}" "${FRONTEND_TARGET_PATH}"; then
-            die "部署 ${FRONTEND_NAME} 失败，且无法恢复原目录: ${backup}"
-        fi
-        rm -rf -- "${staging}"
-        die "部署 ${FRONTEND_NAME} 失败，已恢复原目录。"
-    fi
-    if ! rm -rf -- "${backup}"; then
-        echo "[WARN] ${FRONTEND_NAME} 已更新，但无法清理备份目录: ${backup}" >&2
+    else
+        unzip -oq "${FRONTEND_ARCHIVE_PATH}" -d "${FRONTEND_TARGET_PATH}" \
+            || die "覆盖安装 ${FRONTEND_NAME} 失败。"
     fi
 
-    echo "[DONE] ${FRONTEND_NAME} 已从本地产物更新: ${FRONTEND_TARGET_PATH}"
+    cleanup_frontend_download
+    echo "[DONE] ${FRONTEND_NAME} 已从 GitHub Release 更新: ${FRONTEND_TARGET_PATH}"
+}
+
+function print_frontend_update_config_if_requested {
+    if [ "${FRONTEND_CHOICE}" -eq 0 ]; then
+        return
+    fi
+
+    cat <<EOF
+
+可选：手动在 moonraker.conf 中设置配套 Mainsail 的更新源。
+已有 [update_manager mainsail] 时请修改原段，不要重复添加：
+
+[update_manager mainsail]
+type: web
+channel: stable
+repo: null01024/mainsail-multitool
+path: ~/mainsail
+persistent_files:
+    config.json
+
+保存后重启 Moonraker 生效；本安装器不会自动改写前端更新源。
+发布产物的 release_info.json 必须标识 null01024/mainsail-multitool，
+version 与 Release 标签一致，asset_name 为 mainsail.zip。
+
+EOF
 }
 
 function print_plugins_completion {
@@ -2132,14 +2138,6 @@ function print_configure_completion {
     ${CONFIG_PATH}/${CONFIG_SUBDIR}/
         ${DEPLOYED_CONFIG_FILES}
 EOF
-
-    if [ -n "${CONFIG_BACKUP_PATH}" ]; then
-        cat <<EOF
-
-原配置备份：
-    ${CONFIG_BACKUP_PATH}
-EOF
-    fi
 
     cat <<EOF
 
@@ -2261,6 +2259,7 @@ function run_install {
     else
         print_plugins_completion
     fi
+    print_frontend_update_config_if_requested
 }
 
 function main {
